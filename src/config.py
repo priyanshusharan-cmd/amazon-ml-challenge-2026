@@ -30,9 +30,6 @@ class PipelineConfig:
     CHUNK_SIZE: int = 100_000               # Polars streaming chunk size (records per chunk)
     VALIDATION_SPLIT: int = 100_000         # Hold-out validation S1 entities (60k US, 40k India)
     
-    # --- Countries ---
-    KNOWN_COUNTRIES: List[str] = field(default_factory=lambda: ['US', 'India', 'France'])
-    
     # --- Stage 3: Blocking Tunables ---
     TOP_K: int = 20                         # Number of candidate matches to retain per Source 1 entity
     TFIDF_NGRAM_RANGE: Tuple[int, int] = (3, 3) # Character n-grams for typo-resilient similarity
@@ -62,5 +59,10 @@ class PipelineConfig:
         'n_jobs': -1,
         'verbose': -1
     })
+
+    # --- Kaggle CLI Integration Settings ---
+    KAGGLE_USERNAME: str = 'ashash77'
+    KAGGLE_KERNEL_SLUG: str = 'amazon-ml-2026-gbdt'
+    KAGGLE_DATASET_SLUG: str = 'amazon-ml-2026-features'
 
 config = PipelineConfig()
