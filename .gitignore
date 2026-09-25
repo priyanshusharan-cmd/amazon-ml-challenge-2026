@@ -1,0 +1,32 @@
+# Virtual Environment
+.venv/
+env/
+venv/
+
+# Build and Caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Challenge Artifacts and Intermediates (Persisted locally on disk, not pushed to git)
+artifacts/
+output/
+*.parquet
+*.pkl
+
+# Secrets and Credentials
+.kaggle/
+kaggle.json
+*.env
+*.pem
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Large Datasets
+info/
+dataset/
