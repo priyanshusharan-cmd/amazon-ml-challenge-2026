@@ -119,23 +119,46 @@ class KaggleDeployer:
             logger.error("[Kaggle CLI] Kernel push failed: %s", res.stderr.strip())
 
     def download_artifacts(self, download_dir: Optional[Path] = None):
-        """Downloads trained model.pkl and predictions from Kaggle kernel outputs."""
-        out_dir = Path(download_dir or config.MODELS_DIR)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        """Downloads trained model.pkl and predictions from Kaggle kernel outputs and routes them to workspace folders."""
+        models_dir = Path(download_dir or config.MODELS_DIR)
+        output_dir = config.OUTPUT_DIR
+        models_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info("[Kaggle CLI] Pulling output artifacts from kernel '%s/%s'...", config.KAGGLE_USERNAME, config.KAGGLE_KERNEL_SLUG)
         res = subprocess.run([
             str(self.kaggle_exe), "kernels", "output",
             f"{config.KAGGLE_USERNAME}/{config.KAGGLE_KERNEL_SLUG}",
-            "-p", str(out_dir)
+            "-p", str(models_dir)
         ], capture_output=True, text=True)
 
         if res.returncode == 0:
-            logger.info("[Kaggle CLI] Output artifacts downloaded to %s", out_dir)
+            logger.info("[Kaggle CLI] Raw output artifacts downloaded to %s", models_dir)
+            matching_src = models_dir / "matching_results.tsv"
+            candidate_src = models_dir / "candidate_pairs.tsv"
+            
+            if matching_src.exists():
+                shutil.move(str(matching_src), str(output_dir / "matching_results.tsv"))
+                logger.info("[Artifact Router] Moved matching_results.tsv -> %s", output_dir / "matching_results.tsv")
+            if candidate_src.exists():
+                shutil.move(str(candidate_src), str(output_dir / "candidate_pairs.tsv"))
+                logger.info("[Artifact Router] Moved candidate_pairs.tsv -> %s", output_dir / "candidate_pairs.tsv")
         else:
             logger.warning("[Kaggle CLI] Output download note: %s", res.stdout.strip() or res.stderr.strip())
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Kaggle CLI Deployment & Artifact Synchronization Engine")
+    parser.add_argument("--push", action="store_true", help="Push kernel to Kaggle Cloud and start remote execution")
+    parser.add_argument("--download-only", action="store_true", help="Download output artifacts from existing Kaggle run without pushing")
+    parser.add_argument("--dry-run", action="store_true", default=False, help="Verify deployment configuration without pushing or downloading")
+    args = parser.parse_args()
+
     deployer = KaggleDeployer()
-    deployer.deploy_kernel(dry_run=True)
+    if args.download_only:
+        deployer.download_artifacts()
+    elif args.push:
+        deployer.deploy_kernel(dry_run=False)
+    else:
+        deployer.deploy_kernel(dry_run=True)
