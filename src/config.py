@@ -41,6 +41,8 @@ class PipelineConfig:
     
     # --- Stage 3: Blocking Tunables ---
     TOP_K: int = 20                         # Number of candidate matches to retain per Source 1 entity
+    LAYER4_INTERNAL_TOP_K: int = 100         # TF-IDF candidates passed into Layer 5 before final TOP_K
+    LAYER5_STRONG_ADDRESS_BONUS: float = 0.5 # Evidence-based bonus when normalized address Jaccard >= 0.5
     TFIDF_NGRAM_RANGE: Tuple[int, int] = (3, 3) # Character n-grams for typo-resilient similarity
     TFIDF_MIN_SIMILARITY: float = 0.35      # Cosine similarity cutoff for sparse candidate retrieval
     TFIDF_MAX_FEATURES: int = 50_000        # Vocabulary ceiling for sparse matrix

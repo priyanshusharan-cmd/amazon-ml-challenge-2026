@@ -180,10 +180,10 @@ class PolarsChunkLoader:
                 if len(val_rows) > 0:
                     for country_key, country_df in val_rows.partition_by("country", as_dict=True).items():
                         raw_country = country_key[0] if isinstance(country_key, tuple) else country_key
-                        country = str(raw_country).strip() if raw_country is not None and str(raw_country).strip() else "UNKNOWN"
-                        val_out = config.VAL_SPLIT_DIR / country / f"val_s1_part_{chunk_idx:05d}.parquet"
+                        val_country = str(raw_country).strip() if raw_country is not None and str(raw_country).strip() else "UNKNOWN"
+                        val_out = config.VAL_SPLIT_DIR / val_country / f"val_s1_part_{chunk_idx:05d}.parquet"
                         self._atomic_write_parquet(country_df, val_out)
-                        partition_files[f"val_split:{country}"] = str(val_out)
+                        partition_files[f"val_split:{val_country}"] = str(val_out)
 
             # Adjustment 1: Dynamic Country Partitioning
             partitions = train_chunk.partition_by("country", as_dict=True)

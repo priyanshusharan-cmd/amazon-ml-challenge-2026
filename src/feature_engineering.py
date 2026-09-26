@@ -12,6 +12,7 @@ import psutil
 from rapidfuzz import fuzz, distance
 
 from src.config import config
+from src.normalizer import EntityNormalizer
 from src.state_manager import StateManager
 
 logging.basicConfig(
@@ -44,9 +45,15 @@ class FeatureExtractor:
     """
     def __init__(self, state_manager: Optional[StateManager] = None):
         self.state_manager = state_manager or StateManager(config.PROGRESS_FILE, config.MANIFEST_FILE)
+        self.normalizer = EntityNormalizer()
         self.process = psutil.Process()
         self.peak_memory_mb = 0.0
         config.FEATURES_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _ensure_normalized(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Normalize legacy partitions that predate persisted clean columns."""
+        required = {"name_clean", "address_clean", "legal_suffix", "has_address"}
+        return df if required.issubset(df.columns) else self.normalizer.normalize_polars_df(df)
 
     def _get_memory_mb(self) -> Tuple[float, float]:
         rss = self.process.memory_info().rss / (1024 * 1024)
@@ -200,22 +207,22 @@ class FeatureExtractor:
         logger.info("[%s] Loading cleaned entity lookup tables...", mode.upper())
         s1_entities_df = pl.concat([pl.read_parquet(f) for f in s1_files]) if s1_files else pl.DataFrame()
         target_entities_df = pl.concat([pl.read_parquet(f) for f in s2_s3_files]) if s2_s3_files else pl.DataFrame()
+        if not s1_entities_df.is_empty():
+            s1_entities_df = self._ensure_normalized(s1_entities_df)
+        if not target_entities_df.is_empty():
+            target_entities_df = self._ensure_normalized(target_entities_df)
 
         # Build fast index dicts
         s1_dict = {}
         for r in s1_entities_df.iter_rows(named=True):
             s1_dict[r["entity_id"]] = (
-                r.get("name_clean", r.get("business_name", "")),
-                r.get("address_clean", r.get("business_address", "")),
-                r.get("legal_suffix", "none")
+                r["name_clean"], r["address_clean"], r["legal_suffix"]
             )
 
         target_dict = {}
         for r in target_entities_df.iter_rows(named=True):
             target_dict[r["entity_id"]] = (
-                r.get("name_clean", r.get("business_name", "")),
-                r.get("address_clean", r.get("business_address", "")),
-                r.get("legal_suffix", "none")
+                r["name_clean"], r["address_clean"], r["legal_suffix"]
             )
 
         del s1_entities_df, target_entities_df
