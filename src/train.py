@@ -13,6 +13,7 @@ import psutil
 from src.config import config
 from src.state_manager import StateManager
 from src.feature_engineering import FEATURE_COLUMNS
+from src.evaluate import ThresholdOptimizer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,6 +112,10 @@ class EntityMatcherTrainer:
         import joblib
         joblib.dump(model, model_path)
         logger.info("Saved trained LightGBM binary to %s", model_path)
+
+        if n_val > 0:
+            val_probs = model.predict(X_val, num_iteration=model.best_iteration or None)
+            ThresholdOptimizer(state_manager=self.state_manager).optimize_threshold(val_probs, val_df)
 
         # Compute feature importances
         importance_dict = dict(zip(FEATURE_COLUMNS, model.feature_importance(importance_type="gain").tolist()))

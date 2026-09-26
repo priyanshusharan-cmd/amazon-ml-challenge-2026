@@ -61,7 +61,13 @@ class PolarsChunkLoader:
         val_ids_path = config.VAL_SPLIT_DIR / "val_s1_ids.parquet"
         if val_ids_path.exists():
             df = pl.read_parquet(val_ids_path)
-            return set(df["entity_id"].to_list())
+            if "country" in df.columns:
+                return set(df["entity_id"].to_list())
+            # Older snapshots stored IDs only and cannot safely drive country-aware validation.
+            val_ids_path.unlink()
+            self._validation_split_rebuilt = True
+        else:
+            self._validation_split_rebuilt = True
 
         logger.info("Sampling 100,000 stratified validation Source 1 IDs (seed=%d)...", config.RANDOM_SEED)
         s1_path = config.DATASET_DIR / "train" / "train_source1.tsv"
@@ -73,18 +79,21 @@ class PolarsChunkLoader:
             schema_overrides={"entity_id": pl.String, "country": pl.String}
         ).select(["entity_id", "country"]).collect()
 
-        # Stratified sampling: 60,000 US, 40,000 India
-        val_us = id_country_df.filter(pl.col("country") == "US").sample(
-            n=min(60_000, len(id_country_df)),
-            seed=config.RANDOM_SEED
-        ).select("entity_id")
-        
-        val_in = id_country_df.filter(pl.col("country") == "India").sample(
-            n=min(40_000, len(id_country_df)),
-            seed=config.RANDOM_SEED
-        ).select("entity_id")
-
-        val_df = pl.concat([val_us, val_in])
+        # Allocate the validation budget proportionally across every observed country.
+        groups = id_country_df.partition_by("country", as_dict=True)
+        total = len(id_country_df)
+        allocations = []
+        remaining = min(config.VALIDATION_SPLIT, total)
+        country_sizes = [(key[0] if isinstance(key, tuple) else key, len(frame)) for key, frame in groups.items()]
+        for i, (country, size) in enumerate(country_sizes):
+            n = remaining if i == len(country_sizes) - 1 else min(
+                size, int(round(min(config.VALIDATION_SPLIT, total) * size / max(total, 1)))
+            )
+            n = min(n, remaining)
+            remaining -= n
+            frame = groups[(country,)] if (country,) in groups else groups[country]
+            allocations.append(frame.sample(n=n, seed=config.RANDOM_SEED).select("entity_id", "country"))
+        val_df = pl.concat(allocations) if allocations else id_country_df.head(0)
         self._atomic_write_parquet(val_df, val_ids_path)
         
         val_ids = set(val_df["entity_id"].to_list())
@@ -99,7 +108,8 @@ class PolarsChunkLoader:
         source_key: str,
         tsv_path: Path,
         val_ids: Optional[Set[str]] = None,
-        max_chunks: Optional[int] = None
+        max_chunks: Optional[int] = None,
+        country: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Streams a TSV in chunks of config.CHUNK_SIZE rows.
@@ -112,8 +122,11 @@ class PolarsChunkLoader:
             raise FileNotFoundError(f"Source TSV not found: {tsv_path}")
 
         # Register source file fingerprint in manifest
-        src_info = self.state_manager.register_source_file(source_key, tsv_path)
+        checkpoint_key = f"{source_key}_{country}" if country else source_key
+        src_info = self.state_manager.register_source_file(checkpoint_key, tsv_path)
         completed_chunks = set(src_info.get("completed_chunks", []))
+        if source_key == "train_source1" and getattr(self, "_validation_split_rebuilt", False):
+            completed_chunks.clear()
 
         logger.info(
             "[%s] Starting streaming load from %s (size: %.1f MB, completed chunks: %d)",
@@ -149,6 +162,11 @@ class PolarsChunkLoader:
                     break
                 continue
 
+            if country:
+                country_expr = pl.col("country").fill_null("").str.strip_chars().str.to_lowercase()
+                chunk_df = chunk_df.filter(country_expr == country.strip().lower())
+            chunk_rows = len(chunk_df)
+
             t0 = time.perf_counter()
             partition_files = {}
 
@@ -160,9 +178,12 @@ class PolarsChunkLoader:
                 train_chunk = chunk_df.filter(~is_val)
                 
                 if len(val_rows) > 0:
-                    val_out = config.VAL_SPLIT_DIR / f"val_s1_part_{chunk_idx:05d}.parquet"
-                    self._atomic_write_parquet(val_rows, val_out)
-                    partition_files["val_split"] = str(val_out)
+                    for country_key, country_df in val_rows.partition_by("country", as_dict=True).items():
+                        raw_country = country_key[0] if isinstance(country_key, tuple) else country_key
+                        country = str(raw_country).strip() if raw_country is not None and str(raw_country).strip() else "UNKNOWN"
+                        val_out = config.VAL_SPLIT_DIR / country / f"val_s1_part_{chunk_idx:05d}.parquet"
+                        self._atomic_write_parquet(country_df, val_out)
+                        partition_files[f"val_split:{country}"] = str(val_out)
 
             # Adjustment 1: Dynamic Country Partitioning
             partitions = train_chunk.partition_by("country", as_dict=True)
@@ -183,7 +204,7 @@ class PolarsChunkLoader:
 
             # Record completed chunk atomically in manifest.json
             self.state_manager.mark_chunk_completed(
-                source_key=source_key,
+                source_key=checkpoint_key,
                 chunk_idx=chunk_idx,
                 rows_in_chunk=chunk_rows,
                 partition_files=partition_files
@@ -230,6 +251,8 @@ class PolarsChunkLoader:
         
         src_info = self.state_manager.register_source_file(source_key, tsv_path)
         completed_chunks = set(src_info.get("completed_chunks", []))
+        if getattr(self, "_validation_split_rebuilt", False):
+            completed_chunks.clear()
         
         lf = pl.scan_csv(
             tsv_path,

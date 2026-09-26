@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+import os
 from typing import Dict, Any, Tuple, List
 
 # ==============================================================================
@@ -10,8 +11,16 @@ from typing import Dict, Any, Tuple, List
 @dataclass
 class PipelineConfig:
     # --- Paths ---
-    BASE_DIR: Path = Path(r'D:\AMAZON_ML')
-    DATASET_DIR: Path = BASE_DIR / 'dataset'
+    BASE_DIR: Path = Path(os.environ.get(
+        "AMAZON_ML_BASE_DIR",
+        "/kaggle/working/amazon_ml_pipeline" if Path("/kaggle/working").exists()
+        else Path(__file__).resolve().parent.parent
+    )).resolve()
+    DATASET_DIR: Path = Path(os.environ.get(
+        "AMAZON_ML_DATASET_DIR",
+        "/kaggle/input/amazon-ml-2026-dataset" if Path("/kaggle/input/amazon-ml-2026-dataset").exists()
+        else str(Path(os.environ.get("AMAZON_ML_BASE_DIR", Path(__file__).resolve().parent.parent)) / "dataset")
+    )).resolve()
     ARTIFACTS_DIR: Path = BASE_DIR / 'artifacts'
     OUTPUT_DIR: Path = BASE_DIR / 'output'
     CLEANED_DIR: Path = ARTIFACTS_DIR / 'cleaned'
@@ -28,7 +37,7 @@ class PipelineConfig:
     # --- Core Tunables ---
     RANDOM_SEED: int = 42
     CHUNK_SIZE: int = 100_000               # Polars streaming chunk size (records per chunk)
-    VALIDATION_SPLIT: int = 100_000         # Hold-out validation S1 entities (60k US, 40k India)
+    VALIDATION_SPLIT: int = 100_000         # Hold-out validation S1 entities, allocated across observed countries
     
     # --- Stage 3: Blocking Tunables ---
     TOP_K: int = 20                         # Number of candidate matches to retain per Source 1 entity
@@ -63,6 +72,6 @@ class PipelineConfig:
     # --- Kaggle CLI Integration Settings ---
     KAGGLE_USERNAME: str = 'ashash77'
     KAGGLE_KERNEL_SLUG: str = 'amazon-ml-2026-gbdt'
-    KAGGLE_DATASET_SLUG: str = 'amazon-ml-2026-features'
+    KAGGLE_DATASET_SLUG: str = 'amazon-ml-2026-dataset'
 
 config = PipelineConfig()

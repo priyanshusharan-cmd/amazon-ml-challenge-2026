@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Any, Optional, Set, Tuple
 
@@ -53,6 +54,9 @@ class InferencePipeline:
         t_path = Path(threshold_path or (config.MODELS_DIR / "optimal_threshold.json"))
 
         if dry_run or not feat_path.exists() or not m_path.exists():
+            if not dry_run:
+                missing = [str(path) for path in (feat_path, m_path) if not path.exists()]
+                raise FileNotFoundError("Inference artifacts missing; refusing to emit mock predictions: " + ", ".join(missing))
             logger.info("[DRY RUN MODE] Initialized inference pipeline successfully. Skipping full dataset prediction.")
             self._create_mock_outputs_for_validation_smoke_test()
             val_res = self.run_official_validator()

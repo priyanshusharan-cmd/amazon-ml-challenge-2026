@@ -190,7 +190,7 @@ class FeatureExtractor:
             return {"mode": mode, "total_pairs": 0, "time_sec": 0.0}
 
         # Build entity lookup dictionary across all cleaned partitions
-        s1_files = list(config.VAL_SPLIT_DIR.glob("val_s1_part_*.parquet")) if mode == "val" else list(config.CLEANED_DIR.rglob("*_source1_part_*.parquet"))
+        s1_files = list(config.VAL_SPLIT_DIR.rglob("val_s1_part_*.parquet")) if mode == "val" else list(config.CLEANED_DIR.rglob("*_source1_part_*.parquet"))
         s2_s3_files = list(config.CLEANED_DIR.rglob("*_source2_part_*.parquet")) + list(config.CLEANED_DIR.rglob("*_source3_part_*.parquet"))
         
         if mode == "test":

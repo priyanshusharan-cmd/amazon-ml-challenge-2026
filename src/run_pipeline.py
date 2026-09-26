@@ -32,7 +32,10 @@ def main():
         help="Stage to execute"
     )
     parser.add_argument("--dry-run", action="store_true", help="Execute lightweight verification without heavy compute")
+    parser.add_argument("--country", help="Process one existing country partition during blocking")
     args = parser.parse_args()
+    if args.country and args.stage != "block":
+        parser.error("--country is supported only with --stage block")
 
     sm = StateManager(config.PROGRESS_FILE, config.MANIFEST_FILE)
     logger.info("=== Amazon ML Challenge 2026 Pipeline Orchestrator (Stage: %s) ===", args.stage)
@@ -41,18 +44,24 @@ def main():
         logger.info("--- STAGE 1..3: DATA LOADING & BLOCKING ---")
         loader = PolarsChunkLoader(state_manager=sm)
         val_ids = loader.get_or_create_val_ids()
-        
-        # Stream raw TSVs
-        loader.stream_and_partition_source("train_source1", config.DATASET_DIR / "train" / "train_source1.tsv", val_ids)
-        loader.stream_and_partition_source("train_source2", config.DATASET_DIR / "train" / "train_source2.tsv", val_ids)
-        loader.stream_and_partition_source("train_source3", config.DATASET_DIR / "train" / "train_source3.tsv", val_ids)
+        for source in ("train_source1", "train_source2", "train_source3"):
+            loader.stream_and_partition_source(
+                source, config.DATASET_DIR / "train" / f"{source}.tsv", val_ids,
+                country=args.country
+            )
+        # Ground truth is small and shared by downstream labeling; keep the complete split.
         loader.stream_and_partition_ground_truth(val_ids)
+        if not args.country:
+            # Test data stays on the normal full-dataset inference path.
+            for source in ("source1", "source2", "source3"):
+                loader.stream_and_partition_source(f"test_{source}", config.DATASET_DIR / "test" / f"test_{source}.tsv")
 
         if not args.dry_run:
             blocker = MultiLayerBlocker(state_manager=sm)
-            blocker.run_blocking_pipeline(mode="val")
-            blocker.run_blocking_pipeline(mode="train")
-            blocker.run_blocking_pipeline(mode="test")
+            blocker.run_blocking_pipeline(mode="val", country=args.country)
+            blocker.run_blocking_pipeline(mode="train", country=args.country)
+            if not args.country:
+                blocker.run_blocking_pipeline(mode="test")
 
     if args.stage in ["train", "all"] and not args.dry_run:
         logger.info("--- STAGE 4..5: FEATURE ENGINEERING & MODEL TRAINING ---")
@@ -62,6 +71,25 @@ def main():
 
         trainer = EntityMatcherTrainer(state_manager=sm)
         trainer.train_model(dry_run=args.dry_run)
+
+    if args.stage in ["infer", "all"] and not args.dry_run:
+        # Standalone infer must also prepare test data, blocking, and features.
+        missing_test_sources = [
+            source for source in ("source1", "source2", "source3")
+            if not list(config.CLEANED_DIR.rglob(f"test_{source}_part_*.parquet"))
+        ]
+        if missing_test_sources:
+            loader = PolarsChunkLoader(state_manager=sm)
+            for source in missing_test_sources:
+                loader.stream_and_partition_source(
+                    f"test_{source}", config.DATASET_DIR / "test" / f"test_{source}.tsv"
+                )
+        test_candidates = config.BLOCKED_DIR / "test_candidates.parquet"
+        if not test_candidates.exists():
+            MultiLayerBlocker(state_manager=sm).run_blocking_pipeline(mode="test")
+        test_features = config.FEATURES_DIR / "test_features.parquet"
+        if not test_features.exists():
+            FeatureExtractor(state_manager=sm).extract_features_for_mode("test")
 
     if args.stage in ["infer", "all"] or args.dry_run:
         logger.info("--- STAGE 6: INFERENCE & SUBMISSION GENERATION ---")

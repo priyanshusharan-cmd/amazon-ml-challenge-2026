@@ -138,7 +138,7 @@ class MultiLayerBlocker:
 
         logger.info("[%s | Layer 3] Numeric anchor blocking completed in %.2fs", country, time.perf_counter() - t_l3)
 
-        # Layer 4: Global Hybrid Chunked Sparse Top-K Retrieval
+        # Layer 4: Character 3-gram inverted TF-IDF retrieval
         t_l4 = time.perf_counter()
         
         if n_target > 0 and n_s1 > 0:
@@ -150,76 +150,67 @@ class MultiLayerBlocker:
             )
             all_names_for_vocab = target_names + [n for n in s1_names if n]
             vectorizer.fit(all_names_for_vocab)
-            X_target = vectorizer.transform(target_names).tocsr()
+            # CSC columns are an inverted index: feature -> target posting list.
+            # Keep the same char_wb 3-gram vocabulary and normalized TF-IDF weights,
+            # but never construct a query-by-target similarity matrix.
+            X_target_index = vectorizer.transform(target_names).tocsc()
             X_s1 = vectorizer.transform(s1_names).tocsr()
-            
-            # Pre-transpose Target for fast column slicing (O(1) CSC slicing)
-            X_target_T = X_target.T.tocsc()
-            
-            s1_batch_size = 2_000
-            t_batch_size = 200_000
-            
-            for s1_start in range(0, n_s1, s1_batch_size):
-                s1_end = min(s1_start + s1_batch_size, n_s1)
-                X_s1_chunk = X_s1[s1_start:s1_end]
-                
-                # Maintain local top-K heap for this S1 chunk
-                top_cands_for_chunk = [[] for _ in range(s1_end - s1_start)]
-                
-                for t_start in range(0, n_target, t_batch_size):
-                    t_end = min(t_start + t_batch_size, n_target)
-                    X_target_chunk_T = X_target_T[:, t_start:t_end]
-                    
-                    # Sparse dot product -> shape: (s1_batch, t_batch)
-                    sim_chunk = X_s1_chunk.dot(X_target_chunk_T)
-                    
-                    for local_r in range(sim_chunk.shape[0]):
-                        row = sim_chunk.getrow(local_r)
-                        if row.nnz == 0:
-                            continue
-                            
-                        cols = row.indices
-                        vals = row.data
-                        
-                        mask = vals >= config.TFIDF_MIN_SIMILARITY
-                        if not mask.any():
-                            continue
-                            
-                        cols_filt = cols[mask]
-                        vals_filt = vals[mask]
-                        
-                        if len(vals_filt) > self.top_k:
-                            top_k_idx = np.argpartition(vals_filt, -self.top_k)[-self.top_k:]
-                            cols_filt = cols_filt[top_k_idx]
-                            vals_filt = vals_filt[top_k_idx]
-                            
-                        # Store candidates internally
-                        for c, val in zip(cols_filt, vals_filt):
-                            actual_t_idx = t_start + int(c)
-                            top_cands_for_chunk[local_r].append((float(val), actual_t_idx))
-                            
-                    del sim_chunk
-                
-                # Finalize top-K for this S1 chunk & merge into global candidates_map
-                for local_r in range(s1_end - s1_start):
-                    actual_s1_idx = s1_start + local_r
-                    cands = top_cands_for_chunk[local_r]
-                    if cands:
-                        cands.sort(key=lambda x: x[0], reverse=True)
-                        for val, t_idx in cands[:self.top_k]:
-                            candidates_map[actual_s1_idx][t_idx]["tfidf"] = max(
-                                candidates_map[actual_s1_idx][t_idx].get("tfidf", 0.0), 
-                                val
-                            )
-                
-            del X_target_T
+
+            target_indptr = X_target_index.indptr
+            target_indices = X_target_index.indices
+            target_weights = X_target_index.data
+            query_indptr = X_s1.indptr
+            query_features = X_s1.indices
+            query_weights = X_s1.data
+
+            for s1_idx in range(n_s1):
+                q_start, q_end = query_indptr[s1_idx:s1_idx + 2]
+                if q_start == q_end:
+                    continue
+
+                posting_ids = []
+                posting_scores = []
+                for feature, query_weight in zip(query_features[q_start:q_end], query_weights[q_start:q_end]):
+                    p_start, p_end = target_indptr[feature:feature + 2]
+                    if p_start == p_end:
+                        continue
+                    posting_ids.append(target_indices[p_start:p_end])
+                    posting_scores.append(target_weights[p_start:p_end] * query_weight)
+
+                if not posting_ids:
+                    continue
+
+                # Sum contributions for target IDs reached through multiple grams.
+                matched_ids = np.concatenate(posting_ids)
+                matched_scores = np.concatenate(posting_scores)
+                candidate_ids, inverse = np.unique(matched_ids, return_inverse=True)
+                similarities = np.bincount(inverse, weights=matched_scores, minlength=len(candidate_ids))
+
+                eligible = similarities >= config.TFIDF_MIN_SIMILARITY
+                if not eligible.any():
+                    continue
+                candidate_ids = candidate_ids[eligible]
+                similarities = similarities[eligible]
+                if len(similarities) > self.top_k:
+                    top = np.argpartition(similarities, -self.top_k)[-self.top_k:]
+                    candidate_ids = candidate_ids[top]
+                    similarities = similarities[top]
+
+                for t_idx, similarity in zip(candidate_ids, similarities):
+                    candidates_map[s1_idx][int(t_idx)]["tfidf"] = max(
+                        candidates_map[s1_idx][int(t_idx)].get("tfidf", 0.0),
+                        float(similarity)
+                    )
+
+            del X_target_index, X_s1
             gc.collect()
 
-        logger.info("[%s | Layer 4] Hybrid global TF-IDF retrieval completed in %.2fs", country, time.perf_counter() - t_l4)
+        logger.info("[%s | Layer 4] Character 3-gram inverted retrieval completed in %.2fs", country, time.perf_counter() - t_l4)
 
         # Layer 5: Union, Scoring, Capping to TOP_K
         t_l5 = time.perf_counter()
         pair_s1_ids, pair_target_ids, pair_scores, pair_layers = [], [], [], []
+        l2_hits, l3_hits, l4_hits = [], [], []
 
         for s1_idx in range(n_s1):
             s1_id = s1_ids[s1_idx]
@@ -240,9 +231,7 @@ class MultiLayerBlocker:
             scored_cands.sort(key=lambda x: x[1], reverse=True)
             top_cands = scored_cands[:self.top_k]
 
-            l2_hits, l3_hits, l4_hits = [], [], []
-        
-        for t_idx, score, layers in top_cands:
+            for t_idx, score, layers in top_cands:
                 pair_s1_ids.append(s1_id)
                 pair_target_ids.append(target_ids[t_idx])
                 pair_scores.append(score)
@@ -283,12 +272,18 @@ class MultiLayerBlocker:
         }
         return res_df, stats
 
-    def run_blocking_pipeline(self, mode: str = "train") -> Dict[str, Any]:
-        stage_name = f"stage_3_blocking_{mode}"
+    def run_blocking_pipeline(self, mode: str = "train", country: Optional[str] = None) -> Dict[str, Any]:
+        requested_country = country
+        country_suffix = f"_{requested_country}" if requested_country else ""
+        stage_name = f"stage_3_blocking_{mode}{country_suffix}"
         self.state_manager.mark_in_progress(stage_name)
         t_start = time.perf_counter()
 
         country_dirs = [d for d in config.CLEANED_DIR.iterdir() if d.is_dir()]
+        if requested_country:
+            country_dirs = [d for d in country_dirs if d.name.casefold() == requested_country.casefold()]
+            if not country_dirs:
+                raise FileNotFoundError(f"Country partition not found: {config.CLEANED_DIR / requested_country}")
         logger.info("Found %d dynamic country partitions under %s", len(country_dirs), config.CLEANED_DIR)
 
         all_candidate_dfs = []
@@ -297,7 +292,7 @@ class MultiLayerBlocker:
         for c_dir in country_dirs:
             country = c_dir.name
             s1_pattern = "val_s1_part_*.parquet" if mode == "val" else ("test_source1_part_*.parquet" if mode == "test" else "train_source1_part_*.parquet")
-            search_dir = config.VAL_SPLIT_DIR if mode == "val" else c_dir
+            search_dir = config.VAL_SPLIT_DIR / country if mode == "val" else c_dir
             
             s1_files = list(search_dir.glob(s1_pattern))
             if not s1_files:
@@ -334,34 +329,44 @@ class MultiLayerBlocker:
                 "l4": pl.Series([], dtype=pl.Boolean)
             })
 
-        out_parquet = config.BLOCKED_DIR / f"{mode}_candidates.parquet"
+        out_parquet = (
+            config.BLOCKED_DIR / country_dirs[0].name / f"{mode}_candidates.parquet"
+            if requested_country else config.BLOCKED_DIR / f"{mode}_candidates.parquet"
+        )
         self._atomic_write_parquet(final_cand_df, out_parquet)
-        self.state_manager.record_artifact(f"{mode}_candidates", out_parquet, len(final_cand_df), meta=country_stats)
+        artifact_name = f"{mode}_candidates_{country_dirs[0].name}" if requested_country else f"{mode}_candidates"
+        self.state_manager.record_artifact(artifact_name, out_parquet, len(final_cand_df), meta=country_stats)
 
         if mode == "test":
             self._export_official_candidate_pairs_tsv(final_cand_df)
 
-        recall_est = 0.0
+        recall_est = {"overall": 0.0, "layer2": 0.0, "layer2_3": 0.0, "layer2_3_4": 0.0}
         if mode == "val":
             recall_est = self._estimate_validation_recall(final_cand_df)
 
         elapsed = time.perf_counter() - t_start
+        total_s1_entities = sum(int(stats.get("s1_entities", 0)) for stats in country_stats.values())
         self.state_manager.mark_completed(stage_name, meta={
             "total_candidates": len(final_cand_df),
             "time_sec": elapsed,
-            "recall_estimate": recall_est,
+            "recall_estimate": recall_est["overall"],
+            "per_layer_recall": recall_est,
+            "zero_candidate_entities": self._zero_candidate_count(final_cand_df),
             "country_stats": country_stats
         })
 
         logger.info(
             "[%s Blocking Complete] Total Candidates: %d | Time: %.2fs | Recall Est: %.2f%% | Peak RAM: %.1f MB",
-            mode.upper(), len(final_cand_df), elapsed, recall_est * 100.0, self.peak_memory_mb
+            mode.upper(), len(final_cand_df), elapsed, recall_est["overall"] * 100.0, self.peak_memory_mb
         )
 
         return {
             "mode": mode,
             "total_candidates": len(final_cand_df),
-            "recall_estimate": recall_est,
+            "recall_estimate": recall_est["overall"],
+            "per_layer_recall": recall_est,
+            "zero_candidate_entities": self._zero_candidate_count(final_cand_df),
+            "avg_candidates_per_entity": len(final_cand_df) / max(1, total_s1_entities),
             "time_sec": elapsed,
             "peak_ram_mb": self.peak_memory_mb,
             "country_stats": country_stats
@@ -392,10 +397,20 @@ class MultiLayerBlocker:
         os.replace(tmp_tsv, out_tsv)
         logger.info("Exported official candidate pairs to %s (%d rows)", out_tsv, len(merged))
 
-    def _estimate_validation_recall(self, val_cand_df: pl.DataFrame) -> float:
+    @staticmethod
+    def _zero_candidate_count(val_cand_df: pl.DataFrame) -> int:
+        val_s1_files = list(config.VAL_SPLIT_DIR.glob("*/val_s1_part_*.parquet"))
+        if val_s1_files:
+            all_ids = set()
+            for path in val_s1_files:
+                all_ids.update(pl.read_parquet(path)["entity_id"].to_list())
+            return len(all_ids - set(val_cand_df["source1_entity_id"].to_list()))
+        return 0
+
+    def _estimate_validation_recall(self, val_cand_df: pl.DataFrame) -> Dict[str, float]:
         val_gt_files = list(config.VAL_SPLIT_DIR.glob("val_ground_truth_part_*.parquet"))
         if not val_gt_files:
-            return 0.0
+            return {"overall": 0.0, "layer2": 0.0, "layer2_3": 0.0, "layer2_3_4": 0.0}
         
         val_gt = pl.concat([pl.read_parquet(f) for f in val_gt_files])
         
@@ -406,8 +421,19 @@ class MultiLayerBlocker:
                     pairs_set.add((s1, m))
                     
         if not pairs_set:
-            return 1.0
-            
-        cand_set = set(zip(val_cand_df["source1_entity_id"], val_cand_df["candidate_entity_id"]))
-        found = len(pairs_set & cand_set)
-        return found / len(pairs_set)
+            return {"overall": 1.0, "layer2": 1.0, "layer2_3": 1.0, "layer2_3_4": 1.0}
+
+        def recall(mask):
+            subset = val_cand_df.filter(mask)
+            found = len(pairs_set & set(zip(subset["source1_entity_id"], subset["candidate_entity_id"])))
+            return found / len(pairs_set)
+
+        l2 = pl.col("l2")
+        l3 = pl.col("l3")
+        l4 = pl.col("l4")
+        return {
+            "overall": recall(pl.lit(True)),
+            "layer2": recall(l2),
+            "layer2_3": recall(l2 | l3),
+            "layer2_3_4": recall(l2 | l3 | l4),
+        }
