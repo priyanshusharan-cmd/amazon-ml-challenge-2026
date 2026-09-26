@@ -1,4 +1,5 @@
 import gc
+import multiprocessing as mp
 import logging
 import os
 import re
@@ -54,6 +55,126 @@ def accumulate_tfidf_scores(index, features, weights, scores, touched):
     return np.sort(touched[:touched_count])
 
 
+_GLOBAL_TARGET_INDEX = None
+_GLOBAL_QUERY_INDEX = None
+_GLOBAL_TRUE_TARGET_INDICES = None
+_GLOBAL_N_TARGET = 0
+_GLOBAL_INTERNAL_TOP_K = 100
+_GLOBAL_MIN_SIM = 0.35
+
+_WORKER_SCORES = None
+_WORKER_TOUCHED = None
+
+
+def _init_layer4_worker_scratch(n_target: int, indices_dtype: np.dtype):
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    try:
+        import threadpoolctl
+        threadpoolctl.threadpool_limits(1)
+    except Exception:
+        pass
+    global _WORKER_SCORES, _WORKER_TOUCHED
+    _WORKER_SCORES = np.zeros(n_target, dtype=np.float64)
+    _WORKER_TOUCHED = np.empty(n_target, dtype=indices_dtype)
+
+
+def _layer4_worker_task(batch_range: Tuple[int, int]) -> Tuple[List[Tuple[int, List[Tuple[int, float]]]], Dict[str, int]]:
+    start_idx, end_idx = batch_range
+    target_index = _GLOBAL_TARGET_INDEX
+    query_index = _GLOBAL_QUERY_INDEX
+    true_target_indices = _GLOBAL_TRUE_TARGET_INDICES
+    internal_top_k = _GLOBAL_INTERNAL_TOP_K
+    min_sim = _GLOBAL_MIN_SIM
+    s1_names = _GLOBAL_S1_NAMES
+    target_names = _GLOBAL_TARGET_NAMES
+
+    scores = _WORKER_SCORES
+    touched = _WORKER_TOUCHED
+
+    query_indptr = query_index.indptr
+    query_features = query_index.indices
+    query_weights = query_index.data
+
+    diag_counts = {
+        "after_layer4_before_threshold": 0,
+        "after_layer4_before_top_k": 0,
+        "after_layer4_top_k": 0,
+    }
+
+    has_truth = true_target_indices is not None
+    batch_results = []
+
+    for s1_idx in range(start_idx, end_idx):
+        q_start, q_end = query_indptr[s1_idx:s1_idx + 2]
+        if q_start == q_end:
+            continue
+
+        reached_ids = accumulate_tfidf_scores(
+            target_index,
+            query_features[q_start:q_end],
+            query_weights[q_start:q_end],
+            scores,
+            touched,
+        )
+
+        if has_truth:
+            truth_indices = true_target_indices[s1_idx]
+            diag_counts["after_layer4_before_threshold"] += sum(
+                scores[t_idx] > 0 for t_idx in truth_indices
+            )
+            diag_counts["after_layer4_before_top_k"] += sum(
+                scores[t_idx] >= min_sim for t_idx in truth_indices
+            )
+
+        candidate_ids = reached_ids[scores[reached_ids] >= min_sim]
+
+        if len(candidate_ids) < getattr(config, "LAYER4_FALLBACK_THRESHOLD", 0):
+            from rapidfuzz import process, fuzz
+            query_name = s1_names[s1_idx]
+            if query_name and len(query_name) > 3:
+                fallback_results = process.extract(
+                    query_name, 
+                    target_names, 
+                    scorer=fuzz.token_set_ratio, 
+                    limit=getattr(config, "LAYER4_FALLBACK_TOP_K", 10)
+                )
+                fallback_indices = np.array([match[2] for match in fallback_results if match[1] >= 60.0], dtype=np.int32)
+                if len(fallback_indices) > 0:
+                    for t_idx in fallback_indices:
+                        if scores[t_idx] < min_sim:
+                            scores[t_idx] = min_sim + 0.01
+                    candidate_ids = np.unique(np.concatenate([candidate_ids, fallback_indices]))
+                    reached_ids = np.unique(np.concatenate([reached_ids, fallback_indices]))
+
+        if not len(candidate_ids):
+            scores[reached_ids] = 0.0
+            continue
+
+        similarities = scores[candidate_ids]
+        if len(similarities) > internal_top_k:
+            top = np.argpartition(similarities, -internal_top_k)[-internal_top_k:]
+            candidate_ids = candidate_ids[top]
+            similarities = similarities[top]
+
+        if has_truth:
+            diag_counts["after_layer4_top_k"] += len(
+                true_target_indices[s1_idx] & set(map(int, candidate_ids))
+            )
+
+        cands = [
+            (int(t_idx), float(sim))
+            for t_idx, sim in zip(candidate_ids, similarities)
+        ]
+        batch_results.append((s1_idx, cands))
+        scores[reached_ids] = 0.0
+
+    return batch_results, diag_counts
+
+
 def add_diagnostic_losses(diagnostics):
     """Add explicit loss buckets derived from the survival counters."""
     survival = diagnostics["survival"]
@@ -75,6 +196,7 @@ class MultiLayerBlocker:
         state_manager: Optional[StateManager] = None,
         top_k: int = config.TOP_K,
         layer4_internal_top_k: int = config.LAYER4_INTERNAL_TOP_K,
+        num_workers: Optional[int] = None,
     ):
         if top_k < 1:
             raise ValueError("top_k must be positive")
@@ -82,6 +204,7 @@ class MultiLayerBlocker:
             raise ValueError("layer4_internal_top_k must be at least top_k")
         self.top_k = top_k
         self.layer4_internal_top_k = layer4_internal_top_k
+        self.num_workers = num_workers or os.cpu_count() or 4
         self.state_manager = state_manager or StateManager(config.PROGRESS_FILE, config.MANIFEST_FILE)
         self.normalizer = EntityNormalizer()
         self.process = psutil.Process()
@@ -167,10 +290,12 @@ class MultiLayerBlocker:
         s1_ids = s1_df["entity_id"].to_list()
         s1_names = s1_df["name_clean"].to_list()
         s1_addrs = s1_df["address_clean"].to_list()
+        s1_suffixes = s1_df["legal_suffix"].to_list()
         
         target_ids = target_df["entity_id"].to_list()
         target_names = target_df["name_clean"].to_list()
         target_addrs = target_df["address_clean"].to_list()
+        target_suffixes = target_df["legal_suffix"].to_list()
 
         target_id_to_idx = {entity_id: idx for idx, entity_id in enumerate(target_ids)}
         true_target_indices = []
@@ -273,55 +398,68 @@ class MultiLayerBlocker:
             X_target_index.sum_duplicates()
             X_s1 = vectorizer.transform(s1_names).tocsr()
 
-            scores = np.zeros(n_target, dtype=np.float64)
-            touched = np.empty(n_target, dtype=X_target_index.indices.dtype)
-            query_indptr = X_s1.indptr
-            query_features = X_s1.indices
-            query_weights = X_s1.data
+            try:
+                mp_ctx = mp.get_context("fork")
+            except Exception as exc:
+                raise RuntimeError(
+                    "macOS fork Copy-on-Write mode is required for Layer 4 parallelization. "
+                    "Serialized fallback is refused."
+                ) from exc
 
-            for s1_idx in range(n_s1):
-                q_start, q_end = query_indptr[s1_idx:s1_idx + 2]
-                if q_start == q_end:
-                    continue
+            num_workers = max(1, self.num_workers)
+            logger.info(
+                "[%s | Layer 4] Using macOS fork Copy-on-Write mode for Layer 4 parallelization "
+                "(zero-copy inheritance, W=%d workers)",
+                country, num_workers
+            )
 
-                reached_ids = accumulate_tfidf_scores(
-                    X_target_index, query_features[q_start:q_end],
-                    query_weights[q_start:q_end], scores, touched
-                )
-                if true_matches is not None:
-                    truth_indices = true_target_indices[s1_idx]
-                    diagnostic_counts["after_layer4_before_threshold"] += sum(
-                        scores[t_idx] > 0 for t_idx in truth_indices
-                    )
-                    diagnostic_counts["after_layer4_before_top_k"] += sum(
-                        scores[t_idx] >= config.TFIDF_MIN_SIMILARITY for t_idx in truth_indices
-                    )
-                # Ascending target order preserves the former unique() ordering,
-                # including the input order used by argpartition for ties.
-                candidate_ids = reached_ids[scores[reached_ids] >= config.TFIDF_MIN_SIMILARITY]
-                if not len(candidate_ids):
-                    scores[reached_ids] = 0.0
-                    continue
-                similarities = scores[candidate_ids]
-                if len(similarities) > self.layer4_internal_top_k:
-                    top = np.argpartition(similarities, -self.layer4_internal_top_k)[-self.layer4_internal_top_k:]
-                    candidate_ids = candidate_ids[top]
-                    similarities = similarities[top]
+            global _GLOBAL_TARGET_INDEX, _GLOBAL_QUERY_INDEX, _GLOBAL_TRUE_TARGET_INDICES
+            global _GLOBAL_S1_NAMES, _GLOBAL_TARGET_NAMES
+            global _GLOBAL_N_TARGET, _GLOBAL_INTERNAL_TOP_K, _GLOBAL_MIN_SIM
 
-                if true_matches is not None:
-                    diagnostic_counts["after_layer4_top_k"] += len(
-                        true_target_indices[s1_idx] & set(map(int, candidate_ids))
-                    )
+            _GLOBAL_TARGET_INDEX = X_target_index
+            _GLOBAL_QUERY_INDEX = X_s1
+            _GLOBAL_TRUE_TARGET_INDICES = true_target_indices if true_matches is not None else None
+            _GLOBAL_N_TARGET = n_target
+            _GLOBAL_INTERNAL_TOP_K = self.layer4_internal_top_k
+            _GLOBAL_MIN_SIM = config.TFIDF_MIN_SIMILARITY
+            _GLOBAL_S1_NAMES = s1_names
+            _GLOBAL_TARGET_NAMES = target_names
 
-                for t_idx, similarity in zip(candidate_ids, similarities):
-                    candidates_map[s1_idx][int(t_idx)]["tfidf"] = max(
-                        candidates_map[s1_idx][int(t_idx)].get("tfidf", 0.0),
-                        float(similarity)
-                    )
-                scores[reached_ids] = 0.0
+            if n_s1 <= num_workers * 4:
+                batch_size = max(1, (n_s1 + num_workers - 1) // num_workers)
+            elif n_s1 <= 4000:
+                batch_size = max(25, n_s1 // (num_workers * 4))
+            else:
+                batch_size = max(1000, n_s1 // (num_workers * 4))
 
-            del X_target_index, X_s1, scores, touched
-            gc.collect()
+            tasks = [(i, min(i + batch_size, n_s1)) for i in range(0, n_s1, batch_size)]
+
+            try:
+                with mp_ctx.Pool(
+                    processes=num_workers,
+                    initializer=_init_layer4_worker_scratch,
+                    initargs=(n_target, X_target_index.indices.dtype),
+                ) as pool:
+                    batch_outputs = pool.map(_layer4_worker_task, tasks)
+
+                for batch_candidates, batch_diag in batch_outputs:
+                    if true_matches is not None:
+                        for k in ("after_layer4_before_threshold", "after_layer4_before_top_k", "after_layer4_top_k"):
+                            diagnostic_counts[k] += batch_diag[k]
+
+                    for s1_idx, cands in batch_candidates:
+                        for t_idx, similarity in cands:
+                            candidates_map[s1_idx][t_idx]["tfidf"] = max(
+                                candidates_map[s1_idx][t_idx].get("tfidf", 0.0),
+                                similarity
+                            )
+            finally:
+                _GLOBAL_TARGET_INDEX = None
+                _GLOBAL_QUERY_INDEX = None
+                _GLOBAL_TRUE_TARGET_INDICES = None
+                del X_target_index, X_s1
+                gc.collect()
 
         logger.info("[%s | Layer 4] Character 3-gram inverted retrieval completed in %.2fs", country, time.perf_counter() - t_l4)
 
@@ -334,9 +472,9 @@ class MultiLayerBlocker:
         # Layer 5: Union, Scoring, Capping to TOP_K
         t_l5 = time.perf_counter()
         logger.info(
-            "[%s | Layer 5] score = 2.0*tfidf + 1.2*min(token_hits,3) + 1.5*min(numeric_hits,2) "
-            "+ %.2f*I(address_jaccard>=0.5); final TOP_K=%d",
-            country, config.LAYER5_STRONG_ADDRESS_BONUS, self.top_k
+            "[%s | Layer 5] score = 2.0*tfidf + 1.0*min(token_hits,3) + 1.5*min(numeric_hits,2) "
+            "+ %.2f*address_jaccard; final TOP_K=%d",
+            country, config.LAYER5_ADDRESS_JACCARD_WEIGHT, self.top_k
         )
         pair_s1_ids, pair_target_ids, pair_scores, pair_layers = [], [], [], []
         l2_hits, l3_hits, l4_hits = [], [], []
@@ -359,9 +497,9 @@ class MultiLayerBlocker:
                 )
                 composite_score = (
                     (2.0 * tfidf_score)
-                    + (1.2 * min(token_hit, 3))
+                    + (1.0 * min(token_hit, 3))
                     + (1.5 * min(num_hit, 2))
-                    + (config.LAYER5_STRONG_ADDRESS_BONUS if address_jaccard >= 0.5 else 0.0)
+                    + (config.LAYER5_ADDRESS_JACCARD_WEIGHT * address_jaccard)
                 )
                 layers_count = (1 if tfidf_score > 0 else 0) + (1 if token_hit > 0 else 0) + (1 if num_hit > 0 else 0)
                 scored_cands.append((t_idx, composite_score, layers_count))
@@ -380,12 +518,14 @@ class MultiLayerBlocker:
                     boundary = min(false_selected, key=lambda candidate: candidate[1])
                     boundary_metrics = self._ranking_metrics(
                         s1_idx, boundary[0], boundary[1], cand_dict[boundary[0]],
-                        s1_names, s1_addrs, target_names, target_addrs
+                        s1_names, s1_addrs, s1_suffixes,
+                        target_names, target_addrs, target_suffixes
                     )
                     for lost_idx in lost_true:
                         lost_metrics = self._ranking_metrics(
                             s1_idx, lost_idx, score_by_target[lost_idx], cand_dict[lost_idx],
-                            s1_names, s1_addrs, target_names, target_addrs
+                            s1_names, s1_addrs, s1_suffixes,
+                            target_names, target_addrs, target_suffixes
                         )
                         ranking_audit["lost_true"].append(lost_metrics)
                         ranking_audit["boundary_displacer"].append(boundary_metrics)
@@ -467,21 +607,36 @@ class MultiLayerBlocker:
 
     @staticmethod
     def _ranking_metrics(
-        s1_idx, target_idx, score, hits, s1_names, s1_addrs, target_names, target_addrs
+        s1_idx, target_idx, score, hits,
+        s1_names, s1_addrs, s1_suffixes,
+        target_names, target_addrs, target_suffixes
     ) -> Dict[str, float]:
         s1_name = s1_names[s1_idx] or ""
         target_name = target_names[target_idx] or ""
+        s1_name_tokens = set(s1_name.split())
+        target_name_tokens = set(target_name.split())
         s1_addr_tokens = set((s1_addrs[s1_idx] or "").split())
         target_addr_tokens = set((target_addrs[target_idx] or "").split())
         address_jaccard = MultiLayerBlocker._address_jaccard(s1_addr_tokens, target_addr_tokens)
+        name_jaccard = MultiLayerBlocker._address_jaccard(s1_name_tokens, target_name_tokens)
+        s1_suffix = s1_suffixes[s1_idx] or "none"
+        target_suffix = target_suffixes[target_idx] or "none"
         return {
             "score": float(score),
             "tfidf": float(hits["tfidf"]),
             "token_hits": float(hits["token_hit"]),
             "numeric_hits": float(hits["num_hit"]),
             "exact_name": float(bool(s1_name) and s1_name == target_name),
+            "name_token_jaccard": float(name_jaccard),
             "address_jaccard": float(address_jaccard),
             "strong_address": float(address_jaccard >= 0.5),
+            "address_last_token_match": float(
+                bool(s1_addr_tokens) and bool(target_addr_tokens)
+                and (s1_addrs[s1_idx] or "").split()[-1] == (target_addrs[target_idx] or "").split()[-1]
+            ),
+            "legal_suffix_match": float(
+                s1_suffix != "none" and target_suffix != "none" and s1_suffix == target_suffix
+            ),
             "numeric_only": float(
                 hits["num_hit"] > 0 and hits["token_hit"] == 0 and hits["tfidf"] == 0
             ),

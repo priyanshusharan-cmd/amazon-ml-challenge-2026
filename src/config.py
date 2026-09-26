@@ -40,11 +40,13 @@ class PipelineConfig:
     VALIDATION_SPLIT: int = 100_000         # Hold-out validation S1 entities, allocated across observed countries
     
     # --- Stage 3: Blocking Tunables ---
-    TOP_K: int = 20                         # Number of candidate matches to retain per Source 1 entity
-    LAYER4_INTERNAL_TOP_K: int = 100         # TF-IDF candidates passed into Layer 5 before final TOP_K
-    LAYER5_STRONG_ADDRESS_BONUS: float = 0.5 # Evidence-based bonus when normalized address Jaccard >= 0.5
+    TOP_K: int = 50                         # Number of candidate matches to retain per Source 1 entity
+    LAYER4_INTERNAL_TOP_K: int = 500
+    LAYER4_FALLBACK_THRESHOLD: int = 50
+    LAYER4_FALLBACK_TOP_K: int = 10         # TF-IDF candidates passed into Layer 5 before final TOP_K
+    LAYER5_ADDRESS_JACCARD_WEIGHT: float = 2.5 # Continuous address signal; matches the prior +0.5 at Jaccard=0.5
     TFIDF_NGRAM_RANGE: Tuple[int, int] = (3, 3) # Character n-grams for typo-resilient similarity
-    TFIDF_MIN_SIMILARITY: float = 0.35      # Cosine similarity cutoff for sparse candidate retrieval
+    TFIDF_MIN_SIMILARITY: float = 0.32      # Cosine similarity cutoff for sparse candidate retrieval
     TFIDF_MAX_FEATURES: int = 50_000        # Vocabulary ceiling for sparse matrix
     MAX_TOKEN_DOC_FREQ: float = 0.02        # Ignore tokens appearing in > 2% of records (stop words)
     MIN_TOKEN_LEN: int = 3                  # Ignore single/double character noise tokens
