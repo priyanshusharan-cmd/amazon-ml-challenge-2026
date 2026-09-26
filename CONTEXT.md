@@ -60,3 +60,15 @@ Full `--stage block` ingests all train and test sources, then blocks validation,
 - Package: `<team-name>_submission.zip` in the project root when `scripts/package_submission.py` is run.
 
 Kaggle `--push` uploads the generated notebook/kernel and starts its run; it is not a competition submission upload. `--download-only` downloads a completed kernel's output artifacts. Competition submission is a separate action through the competition's submission page.
+
+
+## Windows Compatibility
+Windows is fully supported but operates sequentially (1 worker) during the memory-intensive Blocking phase to prevent memory serialization crashes. macOS and Linux use `fork` for full parallelization.
+
+### Setup & Benchmark on Windows
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+python scripts\benchmark_india_val.py
+```

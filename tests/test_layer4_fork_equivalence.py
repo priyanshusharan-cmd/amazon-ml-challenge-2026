@@ -9,7 +9,11 @@ from collections import defaultdict
 from pathlib import Path
 
 # Add project root to sys.path
-sys.path.insert(0, "/Users/priyanshusharan/Documents/Codex/2026-09-26/amazon-ml-2026")
+# Add project root to sys.path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.normalizer import EntityNormalizer
 
 import numpy as np

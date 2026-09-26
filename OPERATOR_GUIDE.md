@@ -235,3 +235,18 @@ This creates `antigravity_team_submission.zip` in the project root (default team
 - Official validator skipped: provide `info/data/student_resource/utils/validate_submission.py`; that ignored path does not come from a fresh Git clone.
 - Merge schema error: the country Parquets were produced by incompatible code/schema versions. Keep both machines on the same Git revision and regenerate their country candidate artifacts consistently.
 - Layer 4 performance: no full benchmark has been run after its CSC inverted-index rewrite. Do not infer runtime/recall from earlier blocking runs.
+
+
+## Execution Commands
+
+### macOS / Linux
+```bash
+.venv/bin/python scripts/benchmark_india_val.py
+```
+
+### Windows
+```powershell
+.\.venv\Scripts\python scripts\benchmark_india_val.py
+```
+
+**Note for Windows:** The retrieval pipeline will dynamically fall back to sequential execution (`W=1`) to prevent Out-of-Memory crashes associated with `spawn` serialization.
