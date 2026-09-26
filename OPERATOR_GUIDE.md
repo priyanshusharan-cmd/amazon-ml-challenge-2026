@@ -126,3 +126,8 @@ If local compute is limited, execute remote GBDT training on Kaggle:
 * **Out of Memory (OOM):** `CHUNK_SIZE` in `src/config.py` defaults to `100_000`. If working under strict RAM constraints, lower `CHUNK_SIZE` to `50_000`.
 * **Subsetting Warning:** Every matched ID in `matching_results.tsv` must exist in `candidate_pairs.tsv`. `inference.py` guarantees this by construction.
 * **Corrupt Intermediate Checkpoints:** Run `.\run.ps1 clean` to purge `artifacts/` and restart cleanly.
+
+
+## Kaggle Private Dataset
+
+Ensure the Kaggle dataset shash77/amazon-ml-2026-dataset exists before deploying. The kernel will automatically mount this dataset at /kaggle/input/amazon-ml-2026-dataset.

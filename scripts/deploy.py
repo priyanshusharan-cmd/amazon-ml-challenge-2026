@@ -85,7 +85,7 @@ class KaggleDeployer:
             "enable_gpu": "true",
             "enable_tpu": "false",
             "enable_internet": "false",
-            "dataset_sources": [],
+            "dataset_sources": ["ashash77/amazon-ml-2026-dataset"],
             "competition_sources": [],
             "kernel_sources": []
         }

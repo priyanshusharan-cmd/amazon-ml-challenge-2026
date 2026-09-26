@@ -138,33 +138,84 @@ class MultiLayerBlocker:
 
         logger.info("[%s | Layer 3] Numeric anchor blocking completed in %.2fs", country, time.perf_counter() - t_l3)
 
-        # Layer 4: Char 3-Gram TF-IDF Retrieval
+        # Layer 4: Global Hybrid Chunked Sparse Top-K Retrieval
         t_l4 = time.perf_counter()
-        vectorizer = TfidfVectorizer(
-            analyzer='char_wb',
-            ngram_range=config.TFIDF_NGRAM_RANGE,
-            max_features=config.TFIDF_MAX_FEATURES,
-            sublinear_tf=True
-        )
-
-        all_names_for_vocab = target_names + [n for n in s1_names if n]
-        if len(all_names_for_vocab) > 0:
+        
+        if n_target > 0 and n_s1 > 0:
+            vectorizer = TfidfVectorizer(
+                analyzer='char_wb',
+                ngram_range=config.TFIDF_NGRAM_RANGE,
+                max_features=config.TFIDF_MAX_FEATURES,
+                sublinear_tf=True
+            )
+            all_names_for_vocab = target_names + [n for n in s1_names if n]
             vectorizer.fit(all_names_for_vocab)
-            X_target = vectorizer.transform(target_names)
-            X_s1 = vectorizer.transform(s1_names)
-
-            batch_size = 10_000
-            for start_idx in range(0, n_s1, batch_size):
-                end_idx = min(start_idx + batch_size, n_s1)
-                sim_sub = X_s1[start_idx:end_idx].dot(X_target.T)
+            X_target = vectorizer.transform(target_names).tocsr()
+            X_s1 = vectorizer.transform(s1_names).tocsr()
+            
+            # Pre-transpose Target for fast column slicing (O(1) CSC slicing)
+            X_target_T = X_target.T.tocsc()
+            
+            s1_batch_size = 2_000
+            t_batch_size = 200_000
+            
+            for s1_start in range(0, n_s1, s1_batch_size):
+                s1_end = min(s1_start + s1_batch_size, n_s1)
+                X_s1_chunk = X_s1[s1_start:s1_end]
                 
-                coo = sim_sub.tocoo()
-                for r, c, val in zip(coo.row, coo.col, coo.data):
-                    if val >= config.TFIDF_MIN_SIMILARITY:
-                        actual_s1_idx = start_idx + r
-                        candidates_map[actual_s1_idx][c]["tfidf"] = float(val)
+                # Maintain local top-K heap for this S1 chunk
+                top_cands_for_chunk = [[] for _ in range(s1_end - s1_start)]
+                
+                for t_start in range(0, n_target, t_batch_size):
+                    t_end = min(t_start + t_batch_size, n_target)
+                    X_target_chunk_T = X_target_T[:, t_start:t_end]
+                    
+                    # Sparse dot product -> shape: (s1_batch, t_batch)
+                    sim_chunk = X_s1_chunk.dot(X_target_chunk_T)
+                    
+                    for local_r in range(sim_chunk.shape[0]):
+                        row = sim_chunk.getrow(local_r)
+                        if row.nnz == 0:
+                            continue
+                            
+                        cols = row.indices
+                        vals = row.data
+                        
+                        mask = vals >= config.TFIDF_MIN_SIMILARITY
+                        if not mask.any():
+                            continue
+                            
+                        cols_filt = cols[mask]
+                        vals_filt = vals[mask]
+                        
+                        if len(vals_filt) > self.top_k:
+                            top_k_idx = np.argpartition(vals_filt, -self.top_k)[-self.top_k:]
+                            cols_filt = cols_filt[top_k_idx]
+                            vals_filt = vals_filt[top_k_idx]
+                            
+                        # Store candidates internally
+                        for c, val in zip(cols_filt, vals_filt):
+                            actual_t_idx = t_start + int(c)
+                            top_cands_for_chunk[local_r].append((float(val), actual_t_idx))
+                            
+                    del sim_chunk
+                
+                # Finalize top-K for this S1 chunk & merge into global candidates_map
+                for local_r in range(s1_end - s1_start):
+                    actual_s1_idx = s1_start + local_r
+                    cands = top_cands_for_chunk[local_r]
+                    if cands:
+                        cands.sort(key=lambda x: x[0], reverse=True)
+                        for val, t_idx in cands[:self.top_k]:
+                            candidates_map[actual_s1_idx][t_idx]["tfidf"] = max(
+                                candidates_map[actual_s1_idx][t_idx].get("tfidf", 0.0), 
+                                val
+                            )
+                
+            del X_target_T
+            gc.collect()
 
-        logger.info("[%s | Layer 4] Char 3-gram TF-IDF retrieval completed in %.2fs", country, time.perf_counter() - t_l4)
+        logger.info("[%s | Layer 4] Hybrid global TF-IDF retrieval completed in %.2fs", country, time.perf_counter() - t_l4)
 
         # Layer 5: Union, Scoring, Capping to TOP_K
         t_l5 = time.perf_counter()
@@ -189,17 +240,27 @@ class MultiLayerBlocker:
             scored_cands.sort(key=lambda x: x[1], reverse=True)
             top_cands = scored_cands[:self.top_k]
 
-            for t_idx, score, layers in top_cands:
+            l2_hits, l3_hits, l4_hits = [], [], []
+        
+        for t_idx, score, layers in top_cands:
                 pair_s1_ids.append(s1_id)
                 pair_target_ids.append(target_ids[t_idx])
                 pair_scores.append(score)
                 pair_layers.append(layers)
+                
+                hits = cand_dict[t_idx]
+                l2_hits.append(True if hits["token_hit"] > 0 else False)
+                l3_hits.append(True if hits["num_hit"] > 0 else False)
+                l4_hits.append(True if hits["tfidf"] > 0 else False)
 
         res_df = pl.DataFrame({
             "source1_entity_id": pl.Series(pair_s1_ids, dtype=pl.String),
             "candidate_entity_id": pl.Series(pair_target_ids, dtype=pl.String),
             "heuristic_score": pl.Series(pair_scores, dtype=pl.Float32),
-            "layers_matched": pl.Series(pair_layers, dtype=pl.Int8)
+            "layers_matched": pl.Series(pair_layers, dtype=pl.Int8),
+            "l2": pl.Series(l2_hits, dtype=pl.Boolean),
+            "l3": pl.Series(l3_hits, dtype=pl.Boolean),
+            "l4": pl.Series(l4_hits, dtype=pl.Boolean)
         })
 
         elapsed_total = time.perf_counter() - t0
@@ -267,7 +328,10 @@ class MultiLayerBlocker:
                 "source1_entity_id": pl.Series([], dtype=pl.String),
                 "candidate_entity_id": pl.Series([], dtype=pl.String),
                 "heuristic_score": pl.Series([], dtype=pl.Float32),
-                "layers_matched": pl.Series([], dtype=pl.Int8)
+                "layers_matched": pl.Series([], dtype=pl.Int8),
+                "l2": pl.Series([], dtype=pl.Boolean),
+                "l3": pl.Series([], dtype=pl.Boolean),
+                "l4": pl.Series([], dtype=pl.Boolean)
             })
 
         out_parquet = config.BLOCKED_DIR / f"{mode}_candidates.parquet"
