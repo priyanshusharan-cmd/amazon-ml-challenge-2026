@@ -398,142 +398,143 @@ class MultiLayerBlocker:
             X_target_index.sum_duplicates()
             X_s1 = vectorizer.transform(s1_names).tocsr()
 
-            import sys
+            try:
+                import sys
 
 
-            is_windows = sys.platform == "win32"
+                is_windows = sys.platform == "win32"
 
 
-            num_workers = 1 if is_windows else max(1, self.num_workers)
+                num_workers = 1 if is_windows else max(1, self.num_workers)
 
 
 
-            logger.info(
+                logger.info(
 
 
-                "[%s | Layer 4] Determining parallelization strategy (W=%d workers)",
+                    "[%s | Layer 4] Determining parallelization strategy (W=%d workers)",
 
 
-                country, num_workers
+                    country, num_workers
 
 
-            )
+                )
 
 
 
-            global _GLOBAL_TARGET_INDEX, _GLOBAL_QUERY_INDEX, _GLOBAL_TRUE_TARGET_INDICES
+                global _GLOBAL_TARGET_INDEX, _GLOBAL_QUERY_INDEX, _GLOBAL_TRUE_TARGET_INDICES
 
 
-            global _GLOBAL_N_TARGET, _GLOBAL_INTERNAL_TOP_K, _GLOBAL_MIN_SIM
+                global _GLOBAL_N_TARGET, _GLOBAL_INTERNAL_TOP_K, _GLOBAL_MIN_SIM
 
 
-            global _GLOBAL_S1_NAMES, _GLOBAL_TARGET_NAMES
+                global _GLOBAL_S1_NAMES, _GLOBAL_TARGET_NAMES
 
 
 
-            _GLOBAL_TARGET_INDEX = X_target_index
+                _GLOBAL_TARGET_INDEX = X_target_index
 
 
-            _GLOBAL_QUERY_INDEX = X_s1
+                _GLOBAL_QUERY_INDEX = X_s1
 
 
-            _GLOBAL_TRUE_TARGET_INDICES = true_target_indices if true_matches is not None else None
+                _GLOBAL_TRUE_TARGET_INDICES = true_target_indices if true_matches is not None else None
 
 
-            _GLOBAL_N_TARGET = n_target
+                _GLOBAL_N_TARGET = n_target
 
 
-            _GLOBAL_INTERNAL_TOP_K = self.layer4_internal_top_k
+                _GLOBAL_INTERNAL_TOP_K = self.layer4_internal_top_k
 
 
-            _GLOBAL_MIN_SIM = config.TFIDF_MIN_SIMILARITY
+                _GLOBAL_MIN_SIM = config.TFIDF_MIN_SIMILARITY
 
 
-            _GLOBAL_S1_NAMES = s1_names
+                _GLOBAL_S1_NAMES = s1_names
 
 
-            _GLOBAL_TARGET_NAMES = target_names
+                _GLOBAL_TARGET_NAMES = target_names
 
 
 
-            if n_s1 <= num_workers * 4:
+                if n_s1 <= num_workers * 4:
 
 
-                batch_size = max(1, (n_s1 + num_workers - 1) // num_workers)
+                    batch_size = max(1, (n_s1 + num_workers - 1) // num_workers)
 
 
-            elif n_s1 <= 4000:
+                elif n_s1 <= 4000:
 
 
-                batch_size = max(25, n_s1 // (num_workers * 4))
+                    batch_size = max(25, n_s1 // (num_workers * 4))
 
 
-            else:
+                else:
 
 
-                batch_size = max(1000, n_s1 // (num_workers * 4))
+                    batch_size = max(1000, n_s1 // (num_workers * 4))
 
 
 
-            tasks = [(i, min(i + batch_size, n_s1)) for i in range(0, n_s1, batch_size)]
+                tasks = [(i, min(i + batch_size, n_s1)) for i in range(0, n_s1, batch_size)]
 
 
 
-            if is_windows:
+                if is_windows:
 
 
-                logger.info("[%s | Layer 4] Windows detected. Falling back to safe sequential execution (W=1).", country)
+                    logger.info("[%s | Layer 4] Windows detected. Falling back to safe sequential execution (W=1).", country)
 
 
-                _init_layer4_worker_scratch(n_target, X_target_index.indices.dtype)
+                    _init_layer4_worker_scratch(n_target, X_target_index.indices.dtype)
 
 
-                batch_outputs = [_layer4_worker_task(t) for t in tasks]
+                    batch_outputs = [_layer4_worker_task(t) for t in tasks]
 
 
-            else:
+                else:
 
 
-                try:
+                    try:
 
 
-                    mp_ctx = mp.get_context("fork")
+                        mp_ctx = mp.get_context("fork")
 
 
-                except Exception as exc:
+                    except Exception as exc:
 
 
-                    raise RuntimeError("macOS/Linux fork Copy-on-Write mode is required.") from exc
+                        raise RuntimeError("macOS/Linux fork Copy-on-Write mode is required.") from exc
 
 
-                with mp_ctx.Pool(
+                    with mp_ctx.Pool(
 
 
-                    processes=num_workers,
+                        processes=num_workers,
 
 
-                    initializer=_init_layer4_worker_scratch,
+                        initializer=_init_layer4_worker_scratch,
 
 
-                    initargs=(n_target, X_target_index.indices.dtype),
+                        initargs=(n_target, X_target_index.indices.dtype),
 
 
-                ) as pool:
+                    ) as pool:
 
 
-                    batch_outputs = pool.map(_layer4_worker_task, tasks)
+                        batch_outputs = pool.map(_layer4_worker_task, tasks)
 
-                for batch_candidates, batch_diag in batch_outputs:
-                    if true_matches is not None:
-                        for k in ("after_layer4_before_threshold", "after_layer4_before_top_k", "after_layer4_top_k"):
-                            diagnostic_counts[k] += batch_diag[k]
+                    for batch_candidates, batch_diag in batch_outputs:
+                        if true_matches is not None:
+                            for k in ("after_layer4_before_threshold", "after_layer4_before_top_k", "after_layer4_top_k"):
+                                diagnostic_counts[k] += batch_diag[k]
 
-                    for s1_idx, cands in batch_candidates:
-                        for t_idx, similarity in cands:
-                            candidates_map[s1_idx][t_idx]["tfidf"] = max(
-                                candidates_map[s1_idx][t_idx].get("tfidf", 0.0),
-                                similarity
-                            )
+                        for s1_idx, cands in batch_candidates:
+                            for t_idx, similarity in cands:
+                                candidates_map[s1_idx][t_idx]["tfidf"] = max(
+                                    candidates_map[s1_idx][t_idx].get("tfidf", 0.0),
+                                    similarity
+                                )
             finally:
                 _GLOBAL_TARGET_INDEX = None
                 _GLOBAL_QUERY_INDEX = None
