@@ -3,9 +3,12 @@ import multiprocessing as mp
 import logging
 import os
 import re
+import sys
+import tempfile
 import time
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, Any, Optional, Set, List, Tuple
 
 import numpy as np
@@ -58,12 +61,15 @@ def accumulate_tfidf_scores(index, features, weights, scores, touched):
 _GLOBAL_TARGET_INDEX = None
 _GLOBAL_QUERY_INDEX = None
 _GLOBAL_TRUE_TARGET_INDICES = None
+_GLOBAL_S1_NAMES = None
+_GLOBAL_TARGET_NAMES = None
 _GLOBAL_N_TARGET = 0
-_GLOBAL_INTERNAL_TOP_K = 100
-_GLOBAL_MIN_SIM = 0.35
+_GLOBAL_INTERNAL_TOP_K = config.LAYER4_INTERNAL_TOP_K
+_GLOBAL_MIN_SIM = config.TFIDF_MIN_SIMILARITY
 
 _WORKER_SCORES = None
 _WORKER_TOUCHED = None
+_GLOBAL_DEFER_FALLBACK = False
 
 
 def _init_layer4_worker_scratch(n_target: int, indices_dtype: np.dtype):
@@ -82,7 +88,30 @@ def _init_layer4_worker_scratch(n_target: int, indices_dtype: np.dtype):
     _WORKER_TOUCHED = np.empty(n_target, dtype=indices_dtype)
 
 
-def _layer4_worker_task(batch_range: Tuple[int, int]) -> Tuple[List[Tuple[int, List[Tuple[int, float]]]], Dict[str, int]]:
+def _init_layer4_spawn_worker(target_paths, query_paths, target_shape, query_shape,
+                              n_target, indices_dtype, internal_top_k, min_sim,
+                              true_target_indices):
+    """Attach read-only matrix arrays once in each Windows-spawned worker."""
+    global _GLOBAL_TARGET_INDEX, _GLOBAL_QUERY_INDEX, _GLOBAL_TRUE_TARGET_INDICES
+    global _GLOBAL_N_TARGET, _GLOBAL_INTERNAL_TOP_K, _GLOBAL_MIN_SIM
+    global _GLOBAL_DEFER_FALLBACK
+    target_arrays = [np.load(path, mmap_mode="r", allow_pickle=False) for path in target_paths]
+    query_arrays = [np.load(path, mmap_mode="r", allow_pickle=False) for path in query_paths]
+    _GLOBAL_TARGET_INDEX = SimpleNamespace(
+        data=target_arrays[0], indices=target_arrays[1], indptr=target_arrays[2], shape=target_shape
+    )
+    _GLOBAL_QUERY_INDEX = SimpleNamespace(
+        data=query_arrays[0], indices=query_arrays[1], indptr=query_arrays[2], shape=query_shape
+    )
+    _GLOBAL_TRUE_TARGET_INDICES = true_target_indices
+    _GLOBAL_N_TARGET = n_target
+    _GLOBAL_INTERNAL_TOP_K = internal_top_k
+    _GLOBAL_MIN_SIM = min_sim
+    _GLOBAL_DEFER_FALLBACK = True
+    _init_layer4_worker_scratch(n_target, indices_dtype)
+
+
+def _layer4_worker_task(batch_range: Tuple[int, int]):
     start_idx, end_idx = batch_range
     target_index = _GLOBAL_TARGET_INDEX
     query_index = _GLOBAL_QUERY_INDEX
@@ -104,6 +133,7 @@ def _layer4_worker_task(batch_range: Tuple[int, int]) -> Tuple[List[Tuple[int, L
         "after_layer4_before_top_k": 0,
         "after_layer4_top_k": 0,
     }
+    fallback_queries = []
 
     has_truth = true_target_indices is not None
     batch_results = []
@@ -132,7 +162,9 @@ def _layer4_worker_task(batch_range: Tuple[int, int]) -> Tuple[List[Tuple[int, L
 
         candidate_ids = reached_ids[scores[reached_ids] >= min_sim]
 
-        if len(candidate_ids) < getattr(config, "LAYER4_FALLBACK_THRESHOLD", 0):
+        if len(candidate_ids) < getattr(config, "LAYER4_FALLBACK_THRESHOLD", 0) and _GLOBAL_DEFER_FALLBACK:
+            fallback_queries.append(s1_idx)
+        elif len(candidate_ids) < getattr(config, "LAYER4_FALLBACK_THRESHOLD", 0):
             from rapidfuzz import process, fuzz
             query_name = s1_names[s1_idx]
             if query_name and len(query_name) > 3:
@@ -172,10 +204,10 @@ def _layer4_worker_task(batch_range: Tuple[int, int]) -> Tuple[List[Tuple[int, L
         batch_results.append((s1_idx, cands))
         scores[reached_ids] = 0.0
 
-    return batch_results, diag_counts
+    return batch_results, diag_counts, fallback_queries
 
 
-def add_diagnostic_losses(diagnostics):
+def add_diagnostic_losses(diagnostics, top_k=config.TOP_K):
     """Add explicit loss buckets derived from the survival counters."""
     survival = diagnostics["survival"]
     found = lambda stage: survival[stage]["found_truth_pairs"]
@@ -185,7 +217,7 @@ def add_diagnostic_losses(diagnostics):
         "layer4_threshold_loss_pairs": found("after_layer4_before_threshold") - found("after_layer4_before_top_k"),
         "layer4_top_k_loss_pairs": found("after_layer4_before_top_k") - found("after_layer4_top_k"),
         "combined_pool_missing_pairs": diagnostics["target_present_truth_pairs"] - found("after_combined_pool"),
-        "layer5_ranking_loss_pairs": found("after_combined_pool") - found("after_final_top20"),
+        "layer5_ranking_loss_pairs": found("after_combined_pool") - found(f"after_final_top{top_k}"),
     }
     return diagnostics
 
@@ -278,11 +310,11 @@ class MultiLayerBlocker:
                         for stage in (
                             "after_layer2", "after_layer3", "after_layer4_before_threshold",
                             "after_layer4_before_top_k", "after_layer4_top_k",
-                            "after_combined_pool", "after_final_top20"
+                            "after_combined_pool", f"after_final_top{self.top_k}"
                         )
                     },
                 }
-                stats["diagnostics"] = add_diagnostic_losses(diagnostics)
+                stats["diagnostics"] = add_diagnostic_losses(diagnostics, self.top_k)
             return empty_df, stats
 
         logger.info("[%s] Blocking %d S1 entities against %d target (S2/S3) records...", country, n_s1, n_target)
@@ -314,7 +346,7 @@ class MultiLayerBlocker:
             "after_layer4_before_top_k": 0,
             "after_layer4_top_k": 0,
             "after_combined_pool": 0,
-            "after_final_top20": 0,
+            f"after_final_top{self.top_k}": 0,
         }
 
         candidates_map = defaultdict(lambda: defaultdict(lambda: {"tfidf": 0.0, "token_hit": 0, "num_hit": 0}))
@@ -399,146 +431,107 @@ class MultiLayerBlocker:
             X_s1 = vectorizer.transform(s1_names).tocsr()
 
             try:
-                import sys
-
-
                 is_windows = sys.platform == "win32"
-
-
-                num_workers = 1 if is_windows else max(1, self.num_workers)
-
-
-
-                logger.info(
-
-
-                    "[%s | Layer 4] Determining parallelization strategy (W=%d workers)",
-
-
-                    country, num_workers
-
-
-                )
-
-
+                num_workers = max(1, min(self.num_workers, n_s1))
+                logger.info("[%s | Layer 4] Determining parallelization strategy (W=%d workers)", country, num_workers)
 
                 global _GLOBAL_TARGET_INDEX, _GLOBAL_QUERY_INDEX, _GLOBAL_TRUE_TARGET_INDICES
-
-
                 global _GLOBAL_N_TARGET, _GLOBAL_INTERNAL_TOP_K, _GLOBAL_MIN_SIM
-
-
-                global _GLOBAL_S1_NAMES, _GLOBAL_TARGET_NAMES
-
-
-
+                global _GLOBAL_S1_NAMES, _GLOBAL_TARGET_NAMES, _GLOBAL_DEFER_FALLBACK
                 _GLOBAL_TARGET_INDEX = X_target_index
-
-
                 _GLOBAL_QUERY_INDEX = X_s1
-
-
                 _GLOBAL_TRUE_TARGET_INDICES = true_target_indices if true_matches is not None else None
-
-
                 _GLOBAL_N_TARGET = n_target
-
-
                 _GLOBAL_INTERNAL_TOP_K = self.layer4_internal_top_k
-
-
                 _GLOBAL_MIN_SIM = config.TFIDF_MIN_SIMILARITY
-
-
                 _GLOBAL_S1_NAMES = s1_names
-
-
                 _GLOBAL_TARGET_NAMES = target_names
 
-
-
                 if n_s1 <= num_workers * 4:
-
-
                     batch_size = max(1, (n_s1 + num_workers - 1) // num_workers)
-
-
                 elif n_s1 <= 4000:
-
-
                     batch_size = max(25, n_s1 // (num_workers * 4))
-
-
                 else:
-
-
                     batch_size = max(1000, n_s1 // (num_workers * 4))
-
-
-
                 tasks = [(i, min(i + batch_size, n_s1)) for i in range(0, n_s1, batch_size)]
 
-
+                def consume_batch(output):
+                    batch_candidates, batch_diag, fallback_queries = output
+                    if true_matches is not None:
+                        for key in ("after_layer4_before_threshold", "after_layer4_before_top_k", "after_layer4_top_k"):
+                            diagnostic_counts[key] += batch_diag[key]
+                    base_by_query = dict(batch_candidates)
+                    fallback_set = set(fallback_queries)
+                    for s1_idx in sorted(set(base_by_query) | fallback_set):
+                        tfidf_cands = dict(base_by_query.get(s1_idx, []))
+                        base_ids = set(tfidf_cands)
+                        if s1_idx in fallback_set:
+                            query_name = s1_names[s1_idx]
+                            if query_name and len(query_name) > 3:
+                                from rapidfuzz import process, fuzz
+                                matches = process.extract(
+                                    query_name, target_names, scorer=fuzz.token_set_ratio,
+                                    limit=getattr(config, "LAYER4_FALLBACK_TOP_K", 10)
+                                )
+                                fallback_ids = {int(m[2]) for m in matches if m[1] >= 60.0}
+                                for t_idx in sorted(fallback_ids):
+                                    tfidf_cands.setdefault(t_idx, config.TFIDF_MIN_SIMILARITY + 0.01)
+                                if true_matches is not None:
+                                    diagnostic_counts["after_layer4_top_k"] += len(
+                                        true_target_indices[s1_idx] & (fallback_ids - base_ids)
+                                    )
+                                tfidf_cands = dict(sorted(tfidf_cands.items()))
+                        if len(tfidf_cands) > self.layer4_internal_top_k:
+                            ids = sorted(tfidf_cands)
+                            values = np.asarray([tfidf_cands[t] for t in ids])
+                            keep = np.argpartition(values, -self.layer4_internal_top_k)[-self.layer4_internal_top_k:]
+                            tfidf_cands = {ids[i]: float(values[i]) for i in keep}
+                        for t_idx, similarity in tfidf_cands.items():
+                            candidates_map[s1_idx][t_idx]["tfidf"] = max(
+                                candidates_map[s1_idx][t_idx].get("tfidf", 0.0), similarity
+                            )
 
                 if is_windows:
-
-
-                    logger.info("[%s | Layer 4] Windows detected. Falling back to safe sequential execution (W=1).", country)
-
-
-                    _init_layer4_worker_scratch(n_target, X_target_index.indices.dtype)
-
-
-                    batch_outputs = [_layer4_worker_task(t) for t in tasks]
-
-
+                    logger.info("[%s | Layer 4] Windows spawn: %d workers; arrays are read-only mmap per worker", country, num_workers)
+                    with tempfile.TemporaryDirectory(prefix="amazon_ml_layer4_") as scratch_dir:
+                        target_paths, query_paths = [], []
+                        for label, matrix, paths in (("target", X_target_index, target_paths), ("query", X_s1, query_paths)):
+                            for field in ("data", "indices", "indptr"):
+                                path = Path(scratch_dir) / f"{label}_{field}.npy"
+                                np.save(path, getattr(matrix, field), allow_pickle=False)
+                                paths.append(str(path))
+                        spawn_ctx = mp.get_context("spawn")
+                        with spawn_ctx.Pool(
+                            processes=num_workers,
+                            initializer=_init_layer4_spawn_worker,
+                            initargs=(target_paths, query_paths, X_target_index.shape, X_s1.shape,
+                                      n_target, X_target_index.indices.dtype, self.layer4_internal_top_k,
+                                      config.TFIDF_MIN_SIMILARITY,
+                                      true_target_indices if true_matches is not None else None),
+                        ) as pool:
+                            for output in pool.imap(_layer4_worker_task, tasks, chunksize=1):
+                                consume_batch(output)
                 else:
-
-
                     try:
-
-
                         mp_ctx = mp.get_context("fork")
-
-
                     except Exception as exc:
-
-
                         raise RuntimeError("macOS/Linux fork Copy-on-Write mode is required.") from exc
-
-
+                    _GLOBAL_DEFER_FALLBACK = False
                     with mp_ctx.Pool(
-
-
                         processes=num_workers,
-
-
                         initializer=_init_layer4_worker_scratch,
-
-
                         initargs=(n_target, X_target_index.indices.dtype),
-
-
                     ) as pool:
-
-
                         batch_outputs = pool.map(_layer4_worker_task, tasks)
-
-                    for batch_candidates, batch_diag in batch_outputs:
-                        if true_matches is not None:
-                            for k in ("after_layer4_before_threshold", "after_layer4_before_top_k", "after_layer4_top_k"):
-                                diagnostic_counts[k] += batch_diag[k]
-
-                        for s1_idx, cands in batch_candidates:
-                            for t_idx, similarity in cands:
-                                candidates_map[s1_idx][t_idx]["tfidf"] = max(
-                                    candidates_map[s1_idx][t_idx].get("tfidf", 0.0),
-                                    similarity
-                                )
+                    for output in batch_outputs:
+                        consume_batch(output)
             finally:
                 _GLOBAL_TARGET_INDEX = None
                 _GLOBAL_QUERY_INDEX = None
                 _GLOBAL_TRUE_TARGET_INDICES = None
+                _GLOBAL_S1_NAMES = None
+                _GLOBAL_TARGET_NAMES = None
+                _GLOBAL_DEFER_FALLBACK = False
                 del X_target_index, X_s1
                 gc.collect()
 
@@ -592,7 +585,7 @@ class MultiLayerBlocker:
             if true_matches is not None:
                 truth_indices = true_target_indices[s1_idx]
                 selected_indices = {t_idx for t_idx, _, _ in top_cands}
-                diagnostic_counts["after_final_top20"] += len(truth_indices & selected_indices)
+                diagnostic_counts[f"after_final_top{self.top_k}"] += len(truth_indices & selected_indices)
                 lost_true = (truth_indices & set(cand_dict)) - selected_indices
                 false_selected = [candidate for candidate in top_cands if candidate[0] not in truth_indices]
                 if lost_true and false_selected:
@@ -676,7 +669,7 @@ class MultiLayerBlocker:
                     "recall_of_all_truth": found / total_truth_pairs if total_truth_pairs else 1.0,
                     "recall_of_ingested_truth": found / target_present_pairs if target_present_pairs else 1.0,
                 }
-            stats["diagnostics"] = add_diagnostic_losses(diagnostics)
+            stats["diagnostics"] = add_diagnostic_losses(diagnostics, self.top_k)
             stats["diagnostics"]["ranking_audit"] = self._summarize_ranking_audit(ranking_audit)
             logger.info("[%s | Diagnostics] %s", country, diagnostics)
         return res_df, stats
@@ -852,8 +845,7 @@ class MultiLayerBlocker:
             "diagnostics": diagnostics
         }
 
-    @staticmethod
-    def _combine_country_diagnostics(country_stats: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    def _combine_country_diagnostics(self, country_stats: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         diagnostics = [stats["diagnostics"] for stats in country_stats.values() if "diagnostics" in stats]
         if not diagnostics:
             return {}
@@ -877,7 +869,7 @@ class MultiLayerBlocker:
             }
         if len(diagnostics) == 1 and "ranking_audit" in diagnostics[0]:
             combined["ranking_audit"] = diagnostics[0]["ranking_audit"]
-        return add_diagnostic_losses(combined)
+        return add_diagnostic_losses(combined, self.top_k)
 
     @staticmethod
     def _load_validation_truth(query_ids: Set[str]) -> Dict[str, Set[str]]:

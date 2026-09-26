@@ -4,7 +4,7 @@
 
 Amazon ML Challenge 2026 business-entity resolution. The pipeline reads train/test TSVs, partitions entities by country, creates candidate matches, builds pair features, trains a LightGBM classifier, and writes a submission.
 
-Layer 4 in `src/blocking.py` now retrieves normalized character 3-gram TF-IDF matches through a CSC inverted index. It retains the configured threshold (`0.35`) and `TOP_K` (`20`). **No post-rewrite full validation benchmark has been run**, so recall, runtime, and peak-memory improvement are unverified. Do not treat pre-rewrite measurements as results for this implementation.
+Layer 4 in `src/blocking.py` now retrieves normalized character 3-gram TF-IDF matches through a CSC inverted index. It uses `TFIDF_MIN_SIMILARITY=0.30`, `LAYER4_INTERNAL_TOP_K=1000`, and final `TOP_K=50`. Windows uses `spawn` with read-only memory-mapped sparse arrays initialized once per worker and range-only tasks; macOS/Linux retain `fork` copy-on-write. **No full benchmark has been run after the Windows spawn fix**, so its runtime and memory remain unverified. Do not treat pre-rewrite measurements as results for this implementation.
 
 ## Source map
 
@@ -63,12 +63,12 @@ Kaggle `--push` uploads the generated notebook/kernel and starts its run; it is 
 
 
 ## Windows Compatibility
-Windows is fully supported but operates sequentially (1 worker) during the memory-intensive Blocking phase to prevent memory serialization crashes. macOS and Linux use `fork` for full parallelization.
+Windows Layer 4 uses all available logical CPUs (or fewer when there are fewer queries) with `spawn`. Sparse matrix arrays are written once to temporary `.npy` files and each worker opens them read-only with memory mapping; only query ranges are sent as tasks. Fuzzy fallback runs in the parent to avoid copying millions of target-name strings into every spawned worker. macOS/Linux retain the existing `fork` copy-on-write path. The Windows speed and peak RAM have not yet been benchmarked.
 
 ### Setup & Benchmark on Windows
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
-python scripts\benchmark_india_val.py
+python scripts/benchmark_india_val.py
 ```

@@ -82,7 +82,7 @@ class CorrectnessTests(unittest.TestCase):
             {
                 "after_layer2", "after_layer3", "after_layer4_before_threshold",
                 "after_layer4_before_top_k", "after_layer4_top_k",
-                "after_combined_pool", "after_final_top20",
+                "after_combined_pool", "after_final_top2",
             },
         )
 

@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.normalizer import EntityNormalizer
+from src.config import config
 
 import numpy as np
 import polars as pl
@@ -316,8 +317,8 @@ if __name__ == "__main__":
     logger.info("Starting Pre-Validation Test Harness...")
 
     # Load cleaned India data
-    cleaned_india = Path("/Users/priyanshusharan/Documents/Codex/2026-09-26/amazon-ml-2026/artifacts/cleaned/India")
-    val_india = Path("/Users/priyanshusharan/Documents/Codex/2026-09-26/amazon-ml-2026/artifacts/val_split/India")
+    cleaned_india = config.CLEANED_DIR / "India"
+    val_india = config.VAL_SPLIT_DIR / "India"
 
     s1_files = list(val_india.glob("val_s1_part_*.parquet"))
     target_files = list(cleaned_india.glob("train_source2_part_*.parquet")) + list(cleaned_india.glob("train_source3_part_*.parquet"))

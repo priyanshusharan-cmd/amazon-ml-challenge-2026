@@ -4,22 +4,17 @@ import logging
 import multiprocessing as mp
 import os
 import sys
-import sys
+import time
 from pathlib import Path
 
-# Add project root to path so we can import src from anywhere
+# Resolve the repository root from this script, independent of the current directory.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-import time
-from pathlib import Path
 import numpy as np
 import polars as pl
 import psutil
 
-# Add project root to sys.path
-sys.path.insert(0, "/Users/priyanshusharan/Documents/Codex/2026-09-26/amazon-ml-2026")
 
 from src.blocking import MultiLayerBlocker
 from src.config import config
@@ -60,8 +55,9 @@ if __name__ == "__main__":
     true_matches = blocker_bench._load_validation_truth(set(s1_df["entity_id"].to_list()))
     logger.info("Loaded validation truth for %d queries", len(true_matches))
 
-    # --- 2. Parallel Run (Full worker count = 10) ---
-    logger.info(">>> Running Parallel Fork COW (num_workers=10)...")
+    # Use all available logical CPUs, matching the normal Windows pipeline default.
+    benchmark_workers = os.cpu_count() or 1
+    logger.info(">>> Running parallel Layer 4 (num_workers=%d)...", benchmark_workers)
     gc.collect()
     proc = psutil.Process()
     ram_before_par = proc.memory_info().rss / 1e6
@@ -74,7 +70,7 @@ if __name__ == "__main__":
     monitor_thread.daemon = True
     monitor_thread.start()
 
-    blocker_par = MultiLayerBlocker(num_workers=10)
+    blocker_par = MultiLayerBlocker(num_workers=benchmark_workers)
     t0_par = time.perf_counter()
     df_par, stats_par = blocker_par.block_country_partition("India", s1_df, target_df, true_matches=true_matches)
     total_time_par = time.perf_counter() - t0_par
@@ -98,6 +94,6 @@ if __name__ == "__main__":
     logger.info("=== SUMMARY REPORT ===")
     logger.info("Queries:                  %d", len(s1_df))
     logger.info("Target records:           %d", len(target_df))
-    logger.info("Workers:                  10")
+    logger.info("Workers:                  %d", benchmark_workers)
     logger.info("Parallel Total Time:      %.2fs", total_time_par)
     logger.info("Peak RAM Parallel:        %.1f MB", ram_peak_par)

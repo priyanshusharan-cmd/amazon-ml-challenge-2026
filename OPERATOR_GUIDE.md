@@ -175,7 +175,7 @@ head -n 5 output/candidate_pairs.tsv
 python -m json.tool artifacts/progress.json
 ```
 
-The model and validation artifacts are under `artifacts/models/`; loader/blocking state is recorded in `artifacts/progress.json` and `artifacts/manifest.json`. The current Layer 4 rewrite has **not** been benchmarked after its change; do not assume previous runtime or recall measurements apply.
+The model and validation artifacts are under `artifacts/models/`; loader/blocking state is recorded in `artifacts/progress.json` and `artifacts/manifest.json`. The Windows `spawn` implementation has not yet been full-benchmarked; do not assume a Windows runtime or peak-RAM result until the operator runs the benchmark.
 
 ### Runner shortcuts
 
@@ -234,7 +234,7 @@ This creates `antigravity_team_submission.zip` in the project root (default team
 - Kaggle authentication/access error: verify the token file path/permissions and that the Kaggle user has permission to access the private dataset and kernel.
 - Official validator skipped: provide `info/data/student_resource/utils/validate_submission.py`; that ignored path does not come from a fresh Git clone.
 - Merge schema error: the country Parquets were produced by incompatible code/schema versions. Keep both machines on the same Git revision and regenerate their country candidate artifacts consistently.
-- Layer 4 performance: no full benchmark has been run after its CSC inverted-index rewrite. Do not infer runtime/recall from earlier blocking runs.
+- Layer 4 performance: Windows `spawn` is now implemented but has not been full-benchmarked. The benchmark script uses all available logical CPUs; verify observed worker count, runtime, and peak RAM on the target laptop.
 
 
 ## Execution Commands
@@ -249,4 +249,4 @@ This creates `antigravity_team_submission.zip` in the project root (default team
 .\.venv\Scripts\python scripts\benchmark_india_val.py
 ```
 
-**Note for Windows:** The retrieval pipeline will dynamically fall back to sequential execution (`W=1`) to prevent Out-of-Memory crashes associated with `spawn` serialization.
+**Windows Layer 4:** Uses `spawn` with all available logical CPUs (limited by query count). Sparse matrix data are persisted once to temporary `.npy` files and opened read-only by each worker through memory mapping. Tasks contain only `(start, end)` query ranges. Fuzzy fallback stays in the parent process to avoid duplicating the full target-name list in each worker. macOS/Linux continue using the existing `fork` copy-on-write implementation. Run the India validation benchmark with `python scripts/benchmark_india_val.py` on either operating system; measure RAM/runtime before relying on performance expectations.
