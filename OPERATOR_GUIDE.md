@@ -126,6 +126,14 @@ python -m src.run_pipeline --stage infer
 python -m src.run_pipeline --stage validate
 ```
 
+Generated stages skip existing non-empty outputs by default. Pass `--force` to
+`src.run_pipeline`, `src.feature_engineering`, `src.train`, `src.merge_candidates`,
+or `scripts/package_submission.py` to rebuild outputs. Generated Parquet, model,
+threshold, TSV, and ZIP artifacts have adjacent `.meta.json` checkpoints with a
+timestamp, source commit, config hash, and row count. Feature generation retains
+completed chunk files after interruption and continues to produce the compatible
+consolidated `{mode}_features.parquet` artifact.
+
 `--country` is case-insensitive for selecting the partition. The selected-country block command still scans the train TSVs and the full ground-truth TSV; ingestion checkpoints are country-aware. Blocking progress entries are separated by mode and country. A running block does not resume at an individual Layer 4 query; rerunning can repeat blocking.
 
 ### Country output merge: `python -m src.merge_candidates`
@@ -156,6 +164,19 @@ Training reads `artifacts/blocked/train_candidates.parquet` and `val_candidates.
 - progress/manifest entries under `artifacts/`
 
 Inference writes `output/matching_results.tsv` and `output/candidate_pairs.tsv`. It runs the official validator when the configured validator file exists; otherwise the validator is skipped with a warning. `--stage validate` runs that validator separately. Inspect generated files and logs before submission; for example:
+
+Direct trainer options remain available through the module CLI:
+
+```bash
+python -m src.train --device auto --early-stopping 50
+python -m src.train --device cpu --force
+```
+
+`auto` uses CPU locally and probes CUDA/OpenCL LightGBM support on Kaggle,
+falling back to CPU if that LightGBM build cannot use the GPU. Training selects
+only feature columns from the Parquets to avoid loading candidate ID columns into
+the training matrix. LightGBM fitting itself still constructs a full in-memory
+Dataset; it is not online training.
 
 **PowerShell:**
 
@@ -202,7 +223,9 @@ The dataset slug is configured as `amazon-ml-2026-dataset`; deployment combines 
 |---|---|
 | `python scripts/deploy.py --dry-run` | Verifies Kaggle authentication and Git status, regenerates the notebook and metadata, but does not push/start the remote run. This does write local notebook/metadata files. |
 | `python scripts/deploy.py --push` | Performs those checks, pushes the kernel, and starts the Kaggle run. This uploads the generated notebook/code bundle and metadata; the private dataset is attached by slug, not uploaded from the local `dataset/` folder. |
-| `python scripts/deploy.py --download-only` | Retrieves output files from the existing Kaggle kernel run. It requires the remote run to have finished and its outputs to include both required TSVs. TSVs are copied into local `output/`; downloaded files are placed under `artifacts/models/`. |
+| `python scripts/deploy.py --download-only` | Retrieves output files from the existing Kaggle kernel run. It requires the remote run to have finished and returned both TSVs, `model.pkl`, and `optimal_threshold.json`. TSVs are copied into local `output/`; model files go under `artifacts/models/`. |
+| `python scripts/deploy.py --status` | Shows the configured Kaggle kernel run status. |
+| `python scripts/deploy.py --download` | Alias for `--download-only`; requires the two TSVs, model, and optimized threshold. |
 | `python scripts/deploy.py` | Same behavior as `--dry-run`. |
 
 On Windows, put credentials at `%USERPROFILE%\.kaggle\kaggle.json`; on macOS/Linux use `~/.kaggle/kaggle.json` with mode `600`. The CLI is found in `.venv/Scripts` on Windows, `.venv/bin` on macOS/Linux, or from `PATH`.

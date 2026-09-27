@@ -6,7 +6,7 @@ import re
 import sys
 import tempfile
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Any, Optional, Set, List, Tuple
@@ -58,6 +58,22 @@ def accumulate_tfidf_scores(index, features, weights, scores, touched):
     return np.sort(touched[:touched_count])
 
 
+def score_tfidf_query_sparse(index, features, weights):
+    """Score only targets reached by this query's postings, without O(n_targets) scratch."""
+    posting_ids, posting_scores = [], []
+    for feature, weight in zip(features, weights):
+        start, end = index.indptr[feature:feature + 2]
+        posting_ids.append(index.indices[start:end])
+        posting_scores.append(index.data[start:end] * weight)
+    if not posting_ids:
+        return np.empty(0, dtype=index.indices.dtype), np.empty(0, dtype=np.float64)
+    all_ids = np.concatenate(posting_ids)
+    all_scores = np.concatenate(posting_scores)
+    unique_ids, inverse = np.unique(all_ids, return_inverse=True)
+    scores = np.bincount(inverse, weights=all_scores, minlength=len(unique_ids))
+    return unique_ids, scores
+
+
 _GLOBAL_TARGET_INDEX = None
 _GLOBAL_QUERY_INDEX = None
 _GLOBAL_TRUE_TARGET_INDICES = None
@@ -71,6 +87,120 @@ _WORKER_SCORES = None
 _WORKER_TOUCHED = None
 _GLOBAL_DEFER_FALLBACK = False
 
+# Leave room for the desktop and kernel before allocating Layer 4 workers.
+LAYER4_RESERVED_RAM_BYTES = 3 * 1024 ** 3
+LAYER4_RUNTIME_SAFETY_FLOOR_BYTES = int(1.5 * 1024 ** 3)
+# Conservative private-memory allowance. Fork workers share imported modules
+# and sparse indexes through COW; spawned workers need a larger process budget.
+LAYER4_FORK_WORKER_BASE_RAM_BYTES = 64 * 1024 ** 2
+LAYER4_SPAWN_WORKER_BASE_RAM_BYTES = 768 * 1024 ** 2
+LAYER4_CANDIDATE_RESULT_BYTES = 96
+LAYER4_MIN_QUERY_SCRATCH_BYTES = 16 * 1024 ** 2
+LAYER4_CANDIDATE_MAP_BYTES = 236
+LAYER4_MAX_QUERIES_PER_TASK = 64
+
+
+def _layer4_batch_size(n_queries: int, workers: int) -> int:
+    # Keep each worker's serialized candidate result bounded. The previous
+    # minimum of 1,000 queries could make every concurrent worker return a
+    # very large Python object graph at once.
+    target_batch = max(1, (n_queries + workers * 8 - 1) // (workers * 8))
+    return min(LAYER4_MAX_QUERIES_PER_TASK, target_batch)
+
+
+def _bounded_ordered_pool_results(pool, tasks, max_pending: int):
+    """Yield ordered results while keeping submitted work strictly bounded."""
+    task_iter = iter(tasks)
+    pending = deque()
+    for _ in range(max_pending):
+        try:
+            pending.append(pool.apply_async(_layer4_worker_task, (next(task_iter),)))
+        except StopIteration:
+            break
+    while pending:
+        result = pending.popleft()
+        yield result.get()
+        try:
+            pending.append(pool.apply_async(_layer4_worker_task, (next(task_iter),)))
+        except StopIteration:
+            pass
+
+
+def select_layer4_worker_count(
+    n_queries: int,
+    n_targets: int,
+    indices_dtype: np.dtype,
+    requested_workers: Optional[int] = None,
+    *,
+    cpu_count: Optional[int] = None,
+    available_ram_bytes: Optional[int] = None,
+    total_ram_bytes: Optional[int] = None,
+    internal_top_k: int = config.LAYER4_INTERNAL_TOP_K,
+    worker_base_ram_bytes: int = LAYER4_FORK_WORKER_BASE_RAM_BYTES,
+    max_query_postings: int = 0,
+) -> Tuple[int, Dict[str, int]]:
+    """Select a CPU- and RAM-safe Layer 4 pool size and return its audit data."""
+    memory = psutil.virtual_memory()
+    total_ram = int(total_ram_bytes if total_ram_bytes is not None else memory.total)
+    available_ram = int(available_ram_bytes if available_ram_bytes is not None else memory.available)
+    cpu_limit = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
+    if requested_workers is not None:
+        cpu_limit = min(cpu_limit, max(1, int(requested_workers)))
+    cpu_limit = min(cpu_limit, max(1, int(n_queries)))
+
+    reserved_ram = LAYER4_RESERVED_RAM_BYTES
+    usable_ram = max(0, available_ram - reserved_ram)
+
+    is_fork = worker_base_ram_bytes == LAYER4_FORK_WORKER_BASE_RAM_BYTES
+    if is_fork and total_ram <= 17 * 1024 ** 3 and usable_ram < 8 * 1024 ** 3:
+        # On ~16 GB systems running fork, adaptively cap workers to 12 when safe
+        # (gives ~10 workers at typical available RAM ~5.5 GiB, and up to 10-12 when safe).
+        cpu_limit = min(cpu_limit, 12)
+
+    # Scratch accounts ONLY for worker-private query allocations (never the shared TF-IDF matrix).
+    # Under fork, the TF-IDF matrix is in the parent process and shared via COW.
+    if is_fork:
+        scratch_per_worker = 150 * 1024 ** 2
+    else:
+        # Spawn mode (Windows mmap path)
+        scratch_per_worker = max(
+            LAYER4_MIN_QUERY_SCRATCH_BYTES,
+            int(max_query_postings) * 32 if max_query_postings else 32 * 1024 ** 2,
+        )
+
+    # Include two outstanding result batches per worker plus the parent batch
+    # map. These bounds assume every query reaches the full internal top-K.
+    selected = 1
+    estimated_per_worker = worker_base_ram_bytes + scratch_per_worker
+    for workers in range(cpu_limit, 0, -1):
+        batch_size = _layer4_batch_size(int(n_queries), workers)
+        result_bytes = batch_size * int(internal_top_k) * LAYER4_CANDIDATE_RESULT_BYTES
+        estimate = worker_base_ram_bytes + scratch_per_worker + result_bytes
+        outstanding_bytes = workers * result_bytes * 2
+        parent_batch_bytes = min(int(n_queries), workers * LAYER4_MAX_QUERIES_PER_TASK) * int(internal_top_k) * LAYER4_CANDIDATE_MAP_BYTES
+        total_estimate = workers * (worker_base_ram_bytes + scratch_per_worker) + outstanding_bytes + parent_batch_bytes
+        if total_estimate <= usable_ram:
+            selected = workers
+            estimated_per_worker = estimate
+            break
+        estimated_per_worker = estimate
+
+    if available_ram <= reserved_ram + estimated_per_worker:
+        logger.warning(
+            "Layer 4 available RAM is below the 3 GiB reserve plus one worker estimate; "
+            "using a single worker. Consider freeing memory before continuing."
+        )
+
+    return selected, {
+        "total_ram_bytes": total_ram,
+        "available_ram_bytes": available_ram,
+        "reserved_ram_bytes": reserved_ram,
+        "estimated_worker_ram_bytes": estimated_per_worker,
+        "estimated_total_worker_ram_bytes": total_estimate,
+        "scratch_worker_ram_bytes": scratch_per_worker,
+        "cpu_limit": cpu_limit,
+    }
+
 
 def _init_layer4_worker_scratch(n_target: int, indices_dtype: np.dtype):
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -83,9 +213,9 @@ def _init_layer4_worker_scratch(n_target: int, indices_dtype: np.dtype):
         threadpoolctl.threadpool_limits(1)
     except Exception:
         pass
-    global _WORKER_SCORES, _WORKER_TOUCHED
-    _WORKER_SCORES = np.zeros(n_target, dtype=np.float64)
-    _WORKER_TOUCHED = np.empty(n_target, dtype=indices_dtype)
+    # Avoid allocating arrays proportional to the full 4M target universe in
+    # every process. Query scoring uses compact posting-local arrays instead.
+    gc.disable()  # Worker task objects are acyclic; keep inherited fork pages clean.
 
 
 def _init_layer4_spawn_worker(target_paths, query_paths, target_shape, query_shape,
@@ -121,9 +251,6 @@ def _layer4_worker_task(batch_range: Tuple[int, int]):
     s1_names = _GLOBAL_S1_NAMES
     target_names = _GLOBAL_TARGET_NAMES
 
-    scores = _WORKER_SCORES
-    touched = _WORKER_TOUCHED
-
     query_indptr = query_index.indptr
     query_features = query_index.indices
     query_weights = query_index.data
@@ -143,24 +270,22 @@ def _layer4_worker_task(batch_range: Tuple[int, int]):
         if q_start == q_end:
             continue
 
-        reached_ids = accumulate_tfidf_scores(
-            target_index,
-            query_features[q_start:q_end],
-            query_weights[q_start:q_end],
-            scores,
-            touched,
+        reached_ids, reached_scores = score_tfidf_query_sparse(
+            target_index, query_features[q_start:q_end], query_weights[q_start:q_end]
         )
 
         if has_truth:
             truth_indices = true_target_indices[s1_idx]
-            diag_counts["after_layer4_before_threshold"] += sum(
-                scores[t_idx] > 0 for t_idx in truth_indices
-            )
-            diag_counts["after_layer4_before_top_k"] += sum(
-                scores[t_idx] >= min_sim for t_idx in truth_indices
-            )
+            for t_idx in truth_indices:
+                pos = int(np.searchsorted(reached_ids, t_idx))
+                if pos < len(reached_ids) and reached_ids[pos] == t_idx:
+                    diag_counts["after_layer4_before_threshold"] += 1
+                    if reached_scores[pos] >= min_sim:
+                        diag_counts["after_layer4_before_top_k"] += 1
 
-        candidate_ids = reached_ids[scores[reached_ids] >= min_sim]
+        mask = reached_scores >= min_sim
+        candidate_ids = reached_ids[mask]
+        similarities = reached_scores[mask]
 
         if len(candidate_ids) < getattr(config, "LAYER4_FALLBACK_THRESHOLD", 0) and _GLOBAL_DEFER_FALLBACK:
             fallback_queries.append(s1_idx)
@@ -176,17 +301,15 @@ def _layer4_worker_task(batch_range: Tuple[int, int]):
                 )
                 fallback_indices = np.array([match[2] for match in fallback_results if match[1] >= 60.0], dtype=np.int32)
                 if len(fallback_indices) > 0:
+                    merged = dict(zip(map(int, candidate_ids), map(float, similarities)))
                     for t_idx in fallback_indices:
-                        if scores[t_idx] < min_sim:
-                            scores[t_idx] = min_sim + 0.01
-                    candidate_ids = np.unique(np.concatenate([candidate_ids, fallback_indices]))
-                    reached_ids = np.unique(np.concatenate([reached_ids, fallback_indices]))
+                        merged.setdefault(int(t_idx), min_sim + 0.01)
+                    candidate_ids = np.asarray(sorted(merged), dtype=target_index.indices.dtype)
+                    similarities = np.asarray([merged[int(t)] for t in candidate_ids])
 
         if not len(candidate_ids):
-            scores[reached_ids] = 0.0
             continue
 
-        similarities = scores[candidate_ids]
         if len(similarities) > internal_top_k:
             top = np.argpartition(similarities, -internal_top_k)[-internal_top_k:]
             candidate_ids = candidate_ids[top]
@@ -202,7 +325,6 @@ def _layer4_worker_task(batch_range: Tuple[int, int]):
             for t_idx, sim in zip(candidate_ids, similarities)
         ]
         batch_results.append((s1_idx, cands))
-        scores[reached_ids] = 0.0
 
     return batch_results, diag_counts, fallback_queries
 
@@ -249,6 +371,26 @@ class MultiLayerBlocker:
             self.peak_memory_mb = rss
         return rss, self.peak_memory_mb
 
+    def _sample_process_tree_memory(self) -> Tuple[float, float]:
+        """Return process-tree USS and system available RAM in MiB."""
+        processes = [self.process]
+        try:
+            processes.extend(self.process.children(recursive=True))
+        except psutil.Error:
+            pass
+        uss_bytes = 0
+        parent_rss = 0
+        for proc in processes:
+            try:
+                info = proc.memory_full_info()
+                uss_bytes += getattr(info, "uss", info.rss)
+                if proc.pid == self.process.pid:
+                    parent_rss = info.rss
+            except psutil.Error:
+                continue
+        self.peak_memory_mb = max(self.peak_memory_mb, parent_rss / (1024 ** 2))
+        return uss_bytes / (1024 ** 2), psutil.virtual_memory().available / (1024 ** 2)
+
     def _atomic_write_parquet(self, df: pl.DataFrame, out_path: Path):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = out_path.with_name(f"{out_path.name}.tmp")
@@ -260,21 +402,20 @@ class MultiLayerBlocker:
         country: str,
         s1_df: pl.DataFrame,
         target_df: pl.DataFrame,
-        true_matches: Optional[Dict[str, Set[str]]] = None
+        true_matches: Optional[Dict[str, Set[str]]] = None,
+        output_parts_dir: Optional[Path] = None,
     ) -> Tuple[pl.DataFrame, Dict[str, Any]]:
+        """Block a country using bounded query batches and a full-country TF-IDF index."""
         t0 = time.perf_counter()
-        
-        normalized_columns = {"name_clean", "address_clean", "legal_suffix", "has_address"}
-        if not normalized_columns.issubset(s1_df.columns):
+        required = {"name_clean", "address_clean", "legal_suffix", "has_address"}
+        if not required.issubset(s1_df.columns):
             s1_df = self.normalizer.normalize_polars_df(s1_df)
-        if not normalized_columns.issubset(target_df.columns):
+        if not required.issubset(target_df.columns):
             target_df = self.normalizer.normalize_polars_df(target_df)
 
-        n_s1 = len(s1_df)
-        n_target = len(target_df)
-        
-        if n_s1 == 0 or n_target == 0:
-            empty_df = pl.DataFrame({
+        n_s1, n_target = len(s1_df), len(target_df)
+        if not n_s1 or not n_target:
+            empty = pl.DataFrame({
                 "source1_entity_id": pl.Series([], dtype=pl.String),
                 "candidate_entity_id": pl.Series([], dtype=pl.String),
                 "heuristic_score": pl.Series([], dtype=pl.Float32),
@@ -283,187 +424,244 @@ class MultiLayerBlocker:
                 "l3": pl.Series([], dtype=pl.Boolean),
                 "l4": pl.Series([], dtype=pl.Boolean),
             })
-            stats = {
-                "country": country,
-                "s1_entities": n_s1,
-                "target_entities": n_target,
-                "candidates_generated": 0,
-                "avg_candidates_per_entity": 0.0,
-                "time_sec": 0.0,
-                "peak_ram_mb": self.peak_memory_mb,
-            }
+            stats = {"country": country, "s1_entities": n_s1, "target_entities": n_target,
+                     "candidates_generated": 0, "avg_candidates_per_entity": 0.0,
+                     "queries_with_candidates": 0, "time_sec": 0.0,
+                     "peak_ram_mb": self.peak_memory_mb}
             if true_matches is not None:
-                truth_pairs = sum(len(true_matches.get(entity_id, set())) for entity_id in s1_df["entity_id"])
+                truth_pairs = sum(len(true_matches.get(eid, set())) for eid in s1_df["entity_id"])
+                stages = ("after_layer2", "after_layer3", "after_layer4_before_threshold",
+                          "after_layer4_before_top_k", "after_layer4_top_k", "after_combined_pool",
+                          f"after_final_top{self.top_k}")
                 diagnostics = {
                     "query_entities": n_s1,
-                    "queries_with_ground_truth_row": sum(entity_id in true_matches for entity_id in s1_df["entity_id"]),
-                    "truth_pairs": truth_pairs,
-                    "target_present_truth_pairs": 0,
+                    "queries_with_ground_truth_row": sum(eid in true_matches for eid in s1_df["entity_id"]),
+                    "truth_pairs": truth_pairs, "target_present_truth_pairs": 0,
                     "missing_target_truth_pairs": truth_pairs,
                     "target_ingestion_coverage": 0.0 if truth_pairs else 1.0,
                     "survival": {
-                        stage: {
-                            "found_truth_pairs": 0,
-                            "recall_of_all_truth": 0.0 if truth_pairs else 1.0,
-                            "recall_of_ingested_truth": 1.0,
-                        }
-                        for stage in (
-                            "after_layer2", "after_layer3", "after_layer4_before_threshold",
-                            "after_layer4_before_top_k", "after_layer4_top_k",
-                            "after_combined_pool", f"after_final_top{self.top_k}"
-                        )
+                        stage: {"found_truth_pairs": 0,
+                                "recall_of_all_truth": 0.0 if truth_pairs else 1.0,
+                                "recall_of_ingested_truth": 1.0}
+                        for stage in stages
                     },
                 }
                 stats["diagnostics"] = add_diagnostic_losses(diagnostics, self.top_k)
-            return empty_df, stats
-
-        logger.info("[%s] Blocking %d S1 entities against %d target (S2/S3) records...", country, n_s1, n_target)
+            return empty, stats
 
         s1_ids = s1_df["entity_id"].to_list()
         s1_names = s1_df["name_clean"].to_list()
         s1_addrs = s1_df["address_clean"].to_list()
         s1_suffixes = s1_df["legal_suffix"].to_list()
-        
         target_ids = target_df["entity_id"].to_list()
         target_names = target_df["name_clean"].to_list()
         target_addrs = target_df["address_clean"].to_list()
         target_suffixes = target_df["legal_suffix"].to_list()
 
-        target_id_to_idx = {entity_id: idx for idx, entity_id in enumerate(target_ids)}
         true_target_indices = []
-        total_truth_pairs = 0
-        target_present_pairs = 0
-        for s1_id in s1_ids:
-            truth_ids = true_matches.get(s1_id, set()) if true_matches is not None else set()
-            total_truth_pairs += len(truth_ids)
-            indices = {target_id_to_idx[target_id] for target_id in truth_ids if target_id in target_id_to_idx}
-            target_present_pairs += len(indices)
-            true_target_indices.append(indices)
-        diagnostic_counts = {
-            "after_layer2": 0,
-            "after_layer3": 0,
-            "after_layer4_before_threshold": 0,
-            "after_layer4_before_top_k": 0,
-            "after_layer4_top_k": 0,
-            "after_combined_pool": 0,
-            f"after_final_top{self.top_k}": 0,
-        }
+        total_truth_pairs = target_present_pairs = 0
+        if true_matches is not None:
+            target_id_to_idx = {entity_id: idx for idx, entity_id in enumerate(target_ids)}
+            for s1_id in s1_ids:
+                truth_ids = true_matches.get(s1_id, set())
+                total_truth_pairs += len(truth_ids)
+                indices = {target_id_to_idx[t] for t in truth_ids if t in target_id_to_idx}
+                target_present_pairs += len(indices)
+                true_target_indices.append(indices)
+            del target_id_to_idx
 
-        candidates_map = defaultdict(lambda: defaultdict(lambda: {"tfidf": 0.0, "token_hit": 0, "num_hit": 0}))
+        diag = {k: 0 for k in (
+            "after_layer2", "after_layer3", "after_layer4_before_threshold",
+            "after_layer4_before_top_k", "after_layer4_top_k", "after_combined_pool",
+            f"after_final_top{self.top_k}",
+        )}
 
-        # Layer 2: Rare Token Index
+        # Build reusable target indexes once; query-side candidate maps exist
+        # only for one bounded batch at a time.
         t_l2 = time.perf_counter()
         token_doc_freq = defaultdict(int)
         for name in target_names:
-            if not name: continue
-            for tok in set(name.split()):
-                if len(tok) >= config.MIN_TOKEN_LEN and tok not in GLOBAL_STOP_WORDS:
-                    token_doc_freq[tok] += 1
-
+            if name:
+                for tok in set(name.split()):
+                    if len(tok) >= config.MIN_TOKEN_LEN and tok not in GLOBAL_STOP_WORDS:
+                        token_doc_freq[tok] += 1
         max_freq = max(1, int(n_target * config.MAX_TOKEN_DOC_FREQ))
         valid_rare_tokens = {tok for tok, freq in token_doc_freq.items() if freq <= max_freq}
-
         target_token_index = defaultdict(list)
         for t_idx, name in enumerate(target_names):
-            if not name: continue
-            for tok in set(name.split()):
-                if tok in valid_rare_tokens:
-                    target_token_index[tok].append(t_idx)
-
-        for s1_idx, name in enumerate(s1_names):
-            if not name: continue
-            for tok in set(name.split()):
-                if tok in valid_rare_tokens:
-                    for t_idx in target_token_index[tok][:100]:
-                        candidates_map[s1_idx][t_idx]["token_hit"] += 1
-
-        if true_matches is not None:
-            diagnostic_counts["after_layer2"] = sum(
-                len(indices & set(candidates_map.get(s1_idx, {})))
-                for s1_idx, indices in enumerate(true_target_indices)
-            )
-
+            if name:
+                for tok in set(name.split()):
+                    if tok in valid_rare_tokens:
+                        target_token_index[tok].append(t_idx)
+        del token_doc_freq, valid_rare_tokens
         logger.info("[%s | Layer 2] Rare token index completed in %.2fs", country, time.perf_counter() - t_l2)
 
-        # Layer 3: Numeric Anchor Blocking
         t_l3 = time.perf_counter()
         target_num_index = defaultdict(list)
         for t_idx, (name, addr) in enumerate(zip(target_names, target_addrs)):
-            comb = f"{name} {addr}"
-            nums = set(re.findall(r'\b\d+\b', comb))
-            for num in nums:
+            for num in set(re.findall(r'\b\d+\b', f"{name} {addr}")):
                 if len(num) >= 2:
                     target_num_index[num].append(t_idx)
+        logger.info("[%s | Layer 3] Numeric anchor index completed in %.2fs", country, time.perf_counter() - t_l3)
 
-        for s1_idx, (name, addr) in enumerate(zip(s1_names, s1_addrs)):
-            comb = f"{name} {addr}"
-            nums = set(re.findall(r'\b\d+\b', comb))
-            for num in nums:
-                if len(num) >= 2 and num in target_num_index:
-                    for t_idx in target_num_index[num][:50]:
-                        candidates_map[s1_idx][t_idx]["num_hit"] += 1
-
-        if true_matches is not None:
-            diagnostic_counts["after_layer3"] = sum(
-                len(indices & set(candidates_map.get(s1_idx, {})))
-                for s1_idx, indices in enumerate(true_target_indices)
-            )
-
-        logger.info("[%s | Layer 3] Numeric anchor blocking completed in %.2fs", country, time.perf_counter() - t_l3)
-
-        # Layer 4: Character 3-gram inverted TF-IDF retrieval
         t_l4 = time.perf_counter()
-        
-        if n_target > 0 and n_s1 > 0:
-            vectorizer = TfidfVectorizer(
-                analyzer='char_wb',
-                ngram_range=config.TFIDF_NGRAM_RANGE,
-                max_features=config.TFIDF_MAX_FEATURES,
-                sublinear_tf=True
-            )
-            all_names_for_vocab = target_names + [n for n in s1_names if n]
-            vectorizer.fit(all_names_for_vocab)
-            # CSC columns are an inverted index: feature -> target posting list.
-            # Keep the same char_wb 3-gram vocabulary and normalized TF-IDF weights,
-            # but never construct a query-by-target similarity matrix.
-            X_target_index = vectorizer.transform(target_names).tocsc()
-            X_target_index.sum_duplicates()
-            X_s1 = vectorizer.transform(s1_names).tocsr()
+        vectorizer = TfidfVectorizer(
+            analyzer="char_wb", ngram_range=config.TFIDF_NGRAM_RANGE,
+            max_features=config.TFIDF_MAX_FEATURES, sublinear_tf=True,
+        )
+        all_names_for_vocab = target_names + [n for n in s1_names if n]
+        vectorizer.fit(all_names_for_vocab)
+        X_target_index = vectorizer.transform(target_names).tocsc()
+        X_target_index.sum_duplicates()
+        X_s1 = vectorizer.transform(s1_names).tocsr()
+        del vectorizer, all_names_for_vocab
+        gc.collect()
 
-            try:
-                is_windows = sys.platform == "win32"
-                num_workers = max(1, min(self.num_workers, n_s1))
-                logger.info("[%s | Layer 4] Determining parallelization strategy (W=%d workers)", country, num_workers)
+        posting_lengths = np.diff(X_target_index.indptr)
+        sample_queries = np.linspace(0, n_s1 - 1, num=min(n_s1, 512), dtype=np.int64)
+        max_query_postings = 0
+        for query_idx in sample_queries:
+            start, end = X_s1.indptr[query_idx:query_idx + 2]
+            if start != end:
+                max_query_postings = max(
+                    max_query_postings,
+                    int(posting_lengths[X_s1.indices[start:end]].sum()),
+                )
+        del posting_lengths, sample_queries
+        gc.collect()
 
-                global _GLOBAL_TARGET_INDEX, _GLOBAL_QUERY_INDEX, _GLOBAL_TRUE_TARGET_INDICES
-                global _GLOBAL_N_TARGET, _GLOBAL_INTERNAL_TOP_K, _GLOBAL_MIN_SIM
-                global _GLOBAL_S1_NAMES, _GLOBAL_TARGET_NAMES, _GLOBAL_DEFER_FALLBACK
-                _GLOBAL_TARGET_INDEX = X_target_index
-                _GLOBAL_QUERY_INDEX = X_s1
-                _GLOBAL_TRUE_TARGET_INDICES = true_target_indices if true_matches is not None else None
-                _GLOBAL_N_TARGET = n_target
-                _GLOBAL_INTERNAL_TOP_K = self.layer4_internal_top_k
-                _GLOBAL_MIN_SIM = config.TFIDF_MIN_SIMILARITY
-                _GLOBAL_S1_NAMES = s1_names
-                _GLOBAL_TARGET_NAMES = target_names
+        is_windows = sys.platform == "win32"
+        parallel_mode = "spawn+mmap" if is_windows else "fork"
+        num_workers, memory_plan = select_layer4_worker_count(
+            n_s1, n_target, X_target_index.indices.dtype,
+            requested_workers=self.num_workers,
+            internal_top_k=self.layer4_internal_top_k,
+            max_query_postings=max_query_postings,
+            worker_base_ram_bytes=(LAYER4_SPAWN_WORKER_BASE_RAM_BYTES if is_windows
+                                   else LAYER4_FORK_WORKER_BASE_RAM_BYTES),
+        )
+        if not is_windows:
+            num_workers = min(max(1, int(self.num_workers)), max(1, n_s1))
+            forced_msg = " (FORCED: adaptive RAM cap disabled)"
+        else:
+            forced_msg = ""
+        logger.info(
+            "[%s | Layer 4] RAM plan: total=%.2f GiB, available=%.2f GiB, reserved=%.2f GiB, "
+            "estimated/worker=%.3f GiB, estimated workers+buffers=%.2f GiB, "
+            "workers=%d/%d, mode=%s%s, query_batch=%d",
+            country, memory_plan["total_ram_bytes"] / 1024**3,
+            memory_plan["available_ram_bytes"] / 1024**3,
+            memory_plan["reserved_ram_bytes"] / 1024**3,
+            memory_plan["estimated_worker_ram_bytes"] / 1024**3,
+            memory_plan["estimated_total_worker_ram_bytes"] / 1024**3,
+            num_workers, memory_plan["cpu_limit"], parallel_mode, forced_msg, LAYER4_MAX_QUERIES_PER_TASK,
+        )
 
-                if n_s1 <= num_workers * 4:
-                    batch_size = max(1, (n_s1 + num_workers - 1) // num_workers)
-                elif n_s1 <= 4000:
-                    batch_size = max(25, n_s1 // (num_workers * 4))
-                else:
-                    batch_size = max(1000, n_s1 // (num_workers * 4))
-                tasks = [(i, min(i + batch_size, n_s1)) for i in range(0, n_s1, batch_size)]
+        global _GLOBAL_TARGET_INDEX, _GLOBAL_QUERY_INDEX, _GLOBAL_TRUE_TARGET_INDICES
+        global _GLOBAL_N_TARGET, _GLOBAL_INTERNAL_TOP_K, _GLOBAL_MIN_SIM
+        global _GLOBAL_S1_NAMES, _GLOBAL_TARGET_NAMES, _GLOBAL_DEFER_FALLBACK
+        _GLOBAL_TARGET_INDEX, _GLOBAL_QUERY_INDEX = X_target_index, X_s1
+        _GLOBAL_TRUE_TARGET_INDICES = true_target_indices if true_matches is not None else None
+        _GLOBAL_N_TARGET = n_target
+        _GLOBAL_INTERNAL_TOP_K = self.layer4_internal_top_k
+        _GLOBAL_MIN_SIM = config.TFIDF_MIN_SIMILARITY
+        _GLOBAL_S1_NAMES, _GLOBAL_TARGET_NAMES = s1_names, target_names
+        _GLOBAL_DEFER_FALLBACK = True
 
-                def consume_batch(output):
-                    batch_candidates, batch_diag, fallback_queries = output
+        # Final output is at most TOP_K per query. Flush each ranked batch to
+        # disk so Python lists/DataFrames from earlier batches are released.
+        output_temp = None if output_parts_dir is not None else tempfile.TemporaryDirectory(
+            prefix="amazon_ml_blocked_parts_"
+        )
+        output_part_dir = Path(output_parts_dir) if output_parts_dir is not None else Path(output_temp.name)
+        output_part_dir.mkdir(parents=True, exist_ok=True)
+        for stale_part in output_part_dir.glob("part_*.parquet"):
+            stale_part.unlink()
+        output_part_count = 0
+        total_output_rows = 0
+        queries_with_candidates = 0
+        peak_tree_uss_mb = 0.0
+        min_available_ram_mb = float("inf")
+        ranking_audit = {"lost_true": [], "boundary_displacer": [], "paired": []}
+        pool = None
+        scratch_context = None
+        try:
+            if is_windows:
+                scratch_context = tempfile.TemporaryDirectory(prefix="amazon_ml_layer4_")
+                scratch_dir = Path(scratch_context.name)
+                target_paths, query_paths = [], []
+                for label, matrix, paths in (("target", X_target_index, target_paths), ("query", X_s1, query_paths)):
+                    for field in ("data", "indices", "indptr"):
+                        path = scratch_dir / f"{label}_{field}.npy"
+                        np.save(path, getattr(matrix, field), allow_pickle=False)
+                        paths.append(str(path))
+                ctx = mp.get_context("spawn")
+            else:
+                try:
+                    ctx = mp.get_context("fork")
+                except Exception as exc:
+                    raise RuntimeError("Linux/macOS fork Copy-on-Write mode is required.") from exc
+
+            def make_pool(worker_count):
+                if is_windows:
+                    return ctx.Pool(
+                        processes=worker_count, initializer=_init_layer4_spawn_worker,
+                        initargs=(target_paths, query_paths, X_target_index.shape, X_s1.shape,
+                                  n_target, X_target_index.indices.dtype, self.layer4_internal_top_k,
+                                  config.TFIDF_MIN_SIMILARITY,
+                                  true_target_indices if true_matches is not None else None),
+                    )
+                return ctx.Pool(
+                    processes=worker_count, initializer=_init_layer4_worker_scratch,
+                    initargs=(n_target, X_target_index.indices.dtype),
+                )
+
+            pool = make_pool(num_workers)
+            q_start = 0
+            while q_start < n_s1:
+                q_end = min(q_start + num_workers * LAYER4_MAX_QUERIES_PER_TASK, n_s1)
+                candidates = defaultdict(lambda: defaultdict(lambda: {
+                    "tfidf": 0.0, "token_hit": 0, "num_hit": 0,
+                }))
+                # Layers 2 and 3 for this batch.
+                for s1_idx in range(q_start, q_end):
+                    name = s1_names[s1_idx]
+                    if name:
+                        for tok in set(name.split()):
+                            for t_idx in target_token_index.get(tok, ())[:100]:
+                                candidates[s1_idx][t_idx]["token_hit"] += 1
+                if true_matches is not None:
+                    diag["after_layer2"] += sum(
+                        len(true_target_indices[i] & set(candidates.get(i, {})))
+                        for i in range(q_start, q_end)
+                    )
+                for s1_idx in range(q_start, q_end):
+                    name, addr = s1_names[s1_idx], s1_addrs[s1_idx]
+                    for num in set(re.findall(r'\b\d+\b', f"{name} {addr}")):
+                        if len(num) >= 2:
+                            for t_idx in target_num_index.get(num, ())[:50]:
+                                candidates[s1_idx][t_idx]["num_hit"] += 1
+                if true_matches is not None:
+                    diag["after_layer3"] += sum(
+                        len(true_target_indices[i] & set(candidates.get(i, {})))
+                        for i in range(q_start, q_end)
+                    )
+
+                tasks = [(i, min(i + LAYER4_MAX_QUERIES_PER_TASK, q_end))
+                         for i in range(q_start, q_end, LAYER4_MAX_QUERIES_PER_TASK)]
+                for batch_candidates, batch_diag, fallback_queries in _bounded_ordered_pool_results(
+                    pool, tasks, max_pending=max(1, num_workers * 2)
+                ):
+                    tree_uss, available_mb = self._sample_process_tree_memory()
+                    peak_tree_uss_mb = max(peak_tree_uss_mb, tree_uss)
+                    min_available_ram_mb = min(min_available_ram_mb, available_mb)
                     if true_matches is not None:
                         for key in ("after_layer4_before_threshold", "after_layer4_before_top_k", "after_layer4_top_k"):
-                            diagnostic_counts[key] += batch_diag[key]
-                    base_by_query = dict(batch_candidates)
+                            diag[key] += batch_diag[key]
+                    by_query = dict(batch_candidates)
                     fallback_set = set(fallback_queries)
-                    for s1_idx in sorted(set(base_by_query) | fallback_set):
-                        tfidf_cands = dict(base_by_query.get(s1_idx, []))
+                    for s1_idx in sorted(set(by_query) | fallback_set):
+                        tfidf_cands = dict(by_query.get(s1_idx, []))
                         base_ids = set(tfidf_cands)
                         if s1_idx in fallback_set:
                             query_name = s1_names[s1_idx]
@@ -471,208 +669,198 @@ class MultiLayerBlocker:
                                 from rapidfuzz import process, fuzz
                                 matches = process.extract(
                                     query_name, target_names, scorer=fuzz.token_set_ratio,
-                                    limit=getattr(config, "LAYER4_FALLBACK_TOP_K", 10)
+                                    score_cutoff=60.0,
+                                    limit=getattr(config, "LAYER4_FALLBACK_TOP_K", 10),
                                 )
                                 fallback_ids = {int(m[2]) for m in matches if m[1] >= 60.0}
                                 for t_idx in sorted(fallback_ids):
                                     tfidf_cands.setdefault(t_idx, config.TFIDF_MIN_SIMILARITY + 0.01)
                                 if true_matches is not None:
-                                    diagnostic_counts["after_layer4_top_k"] += len(
+                                    diag["after_layer4_top_k"] += len(
                                         true_target_indices[s1_idx] & (fallback_ids - base_ids)
                                     )
                                 tfidf_cands = dict(sorted(tfidf_cands.items()))
                         if len(tfidf_cands) > self.layer4_internal_top_k:
                             ids = sorted(tfidf_cands)
-                            values = np.asarray([tfidf_cands[t] for t in ids])
-                            keep = np.argpartition(values, -self.layer4_internal_top_k)[-self.layer4_internal_top_k:]
-                            tfidf_cands = {ids[i]: float(values[i]) for i in keep}
-                        for t_idx, similarity in tfidf_cands.items():
-                            candidates_map[s1_idx][t_idx]["tfidf"] = max(
-                                candidates_map[s1_idx][t_idx].get("tfidf", 0.0), similarity
+                            vals = np.asarray([tfidf_cands[t] for t in ids])
+                            keep = np.argpartition(vals, -self.layer4_internal_top_k)[-self.layer4_internal_top_k:]
+                            tfidf_cands = {ids[i]: float(vals[i]) for i in keep}
+                        for t_idx, score in tfidf_cands.items():
+                            candidates[s1_idx][t_idx]["tfidf"] = max(
+                                candidates[s1_idx][t_idx]["tfidf"], score
                             )
 
-                if is_windows:
-                    logger.info("[%s | Layer 4] Windows spawn: %d workers; arrays are read-only mmap per worker", country, num_workers)
-                    with tempfile.TemporaryDirectory(prefix="amazon_ml_layer4_") as scratch_dir:
-                        target_paths, query_paths = [], []
-                        for label, matrix, paths in (("target", X_target_index, target_paths), ("query", X_s1, query_paths)):
-                            for field in ("data", "indices", "indptr"):
-                                path = Path(scratch_dir) / f"{label}_{field}.npy"
-                                np.save(path, getattr(matrix, field), allow_pickle=False)
-                                paths.append(str(path))
-                        spawn_ctx = mp.get_context("spawn")
-                        with spawn_ctx.Pool(
-                            processes=num_workers,
-                            initializer=_init_layer4_spawn_worker,
-                            initargs=(target_paths, query_paths, X_target_index.shape, X_s1.shape,
-                                      n_target, X_target_index.indices.dtype, self.layer4_internal_top_k,
-                                      config.TFIDF_MIN_SIMILARITY,
-                                      true_target_indices if true_matches is not None else None),
-                        ) as pool:
-                            for output in pool.imap(_layer4_worker_task, tasks, chunksize=1):
-                                consume_batch(output)
-                else:
-                    try:
-                        mp_ctx = mp.get_context("fork")
-                    except Exception as exc:
-                        raise RuntimeError("macOS/Linux fork Copy-on-Write mode is required.") from exc
-                    _GLOBAL_DEFER_FALLBACK = False
-                    with mp_ctx.Pool(
-                        processes=num_workers,
-                        initializer=_init_layer4_worker_scratch,
-                        initargs=(n_target, X_target_index.indices.dtype),
-                    ) as pool:
-                        batch_outputs = pool.map(_layer4_worker_task, tasks)
-                    for output in batch_outputs:
-                        consume_batch(output)
-            finally:
-                _GLOBAL_TARGET_INDEX = None
-                _GLOBAL_QUERY_INDEX = None
-                _GLOBAL_TRUE_TARGET_INDICES = None
-                _GLOBAL_S1_NAMES = None
-                _GLOBAL_TARGET_NAMES = None
-                _GLOBAL_DEFER_FALLBACK = False
-                del X_target_index, X_s1
-                gc.collect()
-
-        logger.info("[%s | Layer 4] Character 3-gram inverted retrieval completed in %.2fs", country, time.perf_counter() - t_l4)
-
-        if true_matches is not None:
-            diagnostic_counts["after_combined_pool"] = sum(
-                len(indices & set(candidates_map.get(s1_idx, {})))
-                for s1_idx, indices in enumerate(true_target_indices)
-            )
-
-        # Layer 5: Union, Scoring, Capping to TOP_K
-        t_l5 = time.perf_counter()
-        logger.info(
-            "[%s | Layer 5] score = 2.0*tfidf + 1.0*min(token_hits,3) + 1.5*min(numeric_hits,2) "
-            "+ %.2f*address_jaccard; final TOP_K=%d",
-            country, config.LAYER5_ADDRESS_JACCARD_WEIGHT, self.top_k
-        )
-        pair_s1_ids, pair_target_ids, pair_scores, pair_layers = [], [], [], []
-        l2_hits, l3_hits, l4_hits = [], [], []
-        ranking_audit = {"lost_true": [], "boundary_displacer": [], "paired": []}
-
-        for s1_idx in range(n_s1):
-            s1_id = s1_ids[s1_idx]
-            cand_dict = candidates_map.get(s1_idx, {})
-            if not cand_dict:
-                continue
-
-            scored_cands = []
-            s1_address_tokens = set((s1_addrs[s1_idx] or "").split())
-            for t_idx, hits in cand_dict.items():
-                tfidf_score = hits["tfidf"]
-                token_hit = hits["token_hit"]
-                num_hit = hits["num_hit"]
-                address_jaccard = self._address_jaccard(
-                    s1_address_tokens, set((target_addrs[t_idx] or "").split())
-                )
-                composite_score = (
-                    (2.0 * tfidf_score)
-                    + (1.0 * min(token_hit, 3))
-                    + (1.5 * min(num_hit, 2))
-                    + (config.LAYER5_ADDRESS_JACCARD_WEIGHT * address_jaccard)
-                )
-                layers_count = (1 if tfidf_score > 0 else 0) + (1 if token_hit > 0 else 0) + (1 if num_hit > 0 else 0)
-                scored_cands.append((t_idx, composite_score, layers_count))
-
-            scored_cands.sort(key=lambda x: x[1], reverse=True)
-            score_by_target = {t_idx: score for t_idx, score, _ in scored_cands}
-            top_cands = scored_cands[:self.top_k]
-
-            if true_matches is not None:
-                truth_indices = true_target_indices[s1_idx]
-                selected_indices = {t_idx for t_idx, _, _ in top_cands}
-                diagnostic_counts[f"after_final_top{self.top_k}"] += len(truth_indices & selected_indices)
-                lost_true = (truth_indices & set(cand_dict)) - selected_indices
-                false_selected = [candidate for candidate in top_cands if candidate[0] not in truth_indices]
-                if lost_true and false_selected:
-                    boundary = min(false_selected, key=lambda candidate: candidate[1])
-                    boundary_metrics = self._ranking_metrics(
-                        s1_idx, boundary[0], boundary[1], cand_dict[boundary[0]],
-                        s1_names, s1_addrs, s1_suffixes,
-                        target_names, target_addrs, target_suffixes
+                if true_matches is not None:
+                    diag["after_combined_pool"] += sum(
+                        len(true_target_indices[i] & set(candidates.get(i, {})))
+                        for i in range(q_start, q_end)
                     )
-                    for lost_idx in lost_true:
-                        lost_metrics = self._ranking_metrics(
-                            s1_idx, lost_idx, score_by_target[lost_idx], cand_dict[lost_idx],
-                            s1_names, s1_addrs, s1_suffixes,
-                            target_names, target_addrs, target_suffixes
+
+                out = {"source1_entity_id": [], "candidate_entity_id": [], "heuristic_score": [],
+                       "layers_matched": [], "l2": [], "l3": [], "l4": []}
+                for s1_idx in range(q_start, q_end):
+                    cand_dict = candidates.get(s1_idx, {})
+                    if not cand_dict:
+                        continue
+                    s1_address_tokens = set((s1_addrs[s1_idx] or "").split())
+                    scored = []
+                    for t_idx, hits in cand_dict.items():
+                        address_jaccard = self._address_jaccard(
+                            s1_address_tokens, set((target_addrs[t_idx] or "").split())
                         )
-                        ranking_audit["lost_true"].append(lost_metrics)
-                        ranking_audit["boundary_displacer"].append(boundary_metrics)
-                        ranking_audit["paired"].append({
-                            "lost_exact_name_displaced_by_numeric_only": int(
-                                lost_metrics["exact_name"] and boundary_metrics["numeric_only"]
-                            ),
-                            "lost_strong_address_displaced_by_numeric_only": int(
-                                lost_metrics["strong_address"] and boundary_metrics["numeric_only"]
-                            ),
-                            "score_margin": boundary_metrics["score"] - lost_metrics["score"],
-                        })
+                        score = (2.0 * hits["tfidf"] + min(hits["token_hit"], 3)
+                                 + 1.5 * min(hits["num_hit"], 2)
+                                 + config.LAYER5_ADDRESS_JACCARD_WEIGHT * address_jaccard)
+                        layers = int(hits["tfidf"] > 0) + int(hits["token_hit"] > 0) + int(hits["num_hit"] > 0)
+                        scored.append((t_idx, score, layers))
+                    scored.sort(key=lambda x: x[1], reverse=True)
+                    score_by_target = {t: score for t, score, _ in scored}
+                    selected = scored[:self.top_k]
+                    if selected:
+                        queries_with_candidates += 1
+                    if true_matches is not None:
+                        truths = true_target_indices[s1_idx]
+                        selected_ids = {t for t, _, _ in selected}
+                        diag[f"after_final_top{self.top_k}"] += len(truths & selected_ids)
+                        lost = (truths & set(cand_dict)) - selected_ids
+                        false_selected = [item for item in selected if item[0] not in truths]
+                        if lost and false_selected:
+                            boundary = min(false_selected, key=lambda item: item[1])
+                            boundary_metrics = self._ranking_metrics(
+                                s1_idx, boundary[0], boundary[1], cand_dict[boundary[0]],
+                                s1_names, s1_addrs, s1_suffixes, target_names, target_addrs, target_suffixes,
+                            )
+                            for lost_idx in lost:
+                                lost_metrics = self._ranking_metrics(
+                                    s1_idx, lost_idx, score_by_target[lost_idx], cand_dict[lost_idx],
+                                    s1_names, s1_addrs, s1_suffixes, target_names, target_addrs, target_suffixes,
+                                )
+                                ranking_audit["lost_true"].append(lost_metrics)
+                                ranking_audit["boundary_displacer"].append(boundary_metrics)
+                                ranking_audit["paired"].append({
+                                    "lost_exact_name_displaced_by_numeric_only": int(
+                                        lost_metrics["exact_name"] and boundary_metrics["numeric_only"]
+                                    ),
+                                    "lost_strong_address_displaced_by_numeric_only": int(
+                                        lost_metrics["strong_address"] and boundary_metrics["numeric_only"]
+                                    ),
+                                    "score_margin": boundary_metrics["score"] - lost_metrics["score"],
+                                })
+                    for t_idx, score, layers in selected:
+                        out["source1_entity_id"].append(s1_ids[s1_idx])
+                        out["candidate_entity_id"].append(target_ids[t_idx])
+                        out["heuristic_score"].append(score)
+                        out["layers_matched"].append(layers)
+                        hits = cand_dict[t_idx]
+                        out["l2"].append(hits["token_hit"] > 0)
+                        out["l3"].append(hits["num_hit"] > 0)
+                        out["l4"].append(hits["tfidf"] > 0)
+                if out["source1_entity_id"]:
+                    batch_frame = pl.DataFrame({
+                        "source1_entity_id": pl.Series(out["source1_entity_id"], dtype=pl.String),
+                        "candidate_entity_id": pl.Series(out["candidate_entity_id"], dtype=pl.String),
+                        "heuristic_score": pl.Series(out["heuristic_score"], dtype=pl.Float32),
+                        "layers_matched": pl.Series(out["layers_matched"], dtype=pl.Int8),
+                        "l2": pl.Series(out["l2"], dtype=pl.Boolean),
+                        "l3": pl.Series(out["l3"], dtype=pl.Boolean),
+                        "l4": pl.Series(out["l4"], dtype=pl.Boolean),
+                    })
+                    batch_frame.write_parquet(output_part_dir / f"part_{output_part_count:06d}.parquet",
+                                              compression="snappy")
+                    output_part_count += 1
+                    total_output_rows += len(batch_frame)
+                    del batch_frame
+                del candidates, out
+                gc.collect()
+                q_start = q_end
+                if is_windows and q_start < n_s1:
+                    current_available = int(psutil.virtual_memory().available)
+                    # When workers are already running, their private memory is already resident.
+                    # Only re-evaluate pool downscaling if available RAM falls below the runtime safety floor.
+                    if current_available < LAYER4_RUNTIME_SAFETY_FLOOR_BYTES:
+                        releasable = num_workers * memory_plan["estimated_worker_ram_bytes"]
+                        effective_available = current_available + releasable
+                        safer_workers, _ = select_layer4_worker_count(
+                            n_s1 - q_start, n_target, X_target_index.indices.dtype,
+                            requested_workers=num_workers,
+                            internal_top_k=self.layer4_internal_top_k,
+                            max_query_postings=max_query_postings,
+                            available_ram_bytes=effective_available,
+                            total_ram_bytes=memory_plan["total_ram_bytes"],
+                            worker_base_ram_bytes=(LAYER4_SPAWN_WORKER_BASE_RAM_BYTES if is_windows
+                                                   else LAYER4_FORK_WORKER_BASE_RAM_BYTES),
+                        )
+                        if safer_workers < num_workers:
+                            logger.warning(
+                                "[%s | Layer 4] Available RAM fell (%.2f GiB); scaling workers down from %d to %d",
+                                country, current_available / 1024**3, num_workers, safer_workers,
+                            )
+                            pool.close()
+                            pool.join()
+                            num_workers = safer_workers
+                            pool = make_pool(num_workers)
+        except Exception:
+            if output_temp is not None:
+                output_temp.cleanup()
+            raise
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+            if scratch_context is not None:
+                scratch_context.cleanup()
+            _GLOBAL_TARGET_INDEX = _GLOBAL_QUERY_INDEX = _GLOBAL_TRUE_TARGET_INDICES = None
+            _GLOBAL_S1_NAMES = _GLOBAL_TARGET_NAMES = None
+            _GLOBAL_DEFER_FALLBACK = False
+            del X_target_index, X_s1
+            gc.collect()
 
-            for t_idx, score, layers in top_cands:
-                pair_s1_ids.append(s1_id)
-                pair_target_ids.append(target_ids[t_idx])
-                pair_scores.append(score)
-                pair_layers.append(layers)
-                
-                hits = cand_dict[t_idx]
-                l2_hits.append(True if hits["token_hit"] > 0 else False)
-                l3_hits.append(True if hits["num_hit"] > 0 else False)
-                l4_hits.append(True if hits["tfidf"] > 0 else False)
-
-        res_df = pl.DataFrame({
-            "source1_entity_id": pl.Series(pair_s1_ids, dtype=pl.String),
-            "candidate_entity_id": pl.Series(pair_target_ids, dtype=pl.String),
-            "heuristic_score": pl.Series(pair_scores, dtype=pl.Float32),
-            "layers_matched": pl.Series(pair_layers, dtype=pl.Int8),
-            "l2": pl.Series(l2_hits, dtype=pl.Boolean),
-            "l3": pl.Series(l3_hits, dtype=pl.Boolean),
-            "l4": pl.Series(l4_hits, dtype=pl.Boolean)
+        empty_result = pl.DataFrame({
+            "source1_entity_id": pl.Series([], dtype=pl.String),
+            "candidate_entity_id": pl.Series([], dtype=pl.String),
+            "heuristic_score": pl.Series([], dtype=pl.Float32),
+            "layers_matched": pl.Series([], dtype=pl.Int8),
+            "l2": pl.Series([], dtype=pl.Boolean), "l3": pl.Series([], dtype=pl.Boolean),
+            "l4": pl.Series([], dtype=pl.Boolean),
         })
-
-        elapsed_total = time.perf_counter() - t0
-        avg_cands = len(res_df) / max(1, n_s1)
-        rss_mb, peak_mb = self._get_memory_mb()
-
-        logger.info(
-            "[%s | Layer 5] Blocking complete in %.2fs | Candidates: %d (Avg %.1f/entity) | RAM: %.1f MB",
-            country, elapsed_total, len(res_df), avg_cands, rss_mb
-        )
-
+        result = (pl.scan_parquet(str(output_part_dir / "part_*.parquet"))
+                  .collect(engine="streaming") if output_part_count and output_temp is not None else empty_result)
+        if output_temp is not None:
+            output_temp.cleanup()
+        del target_token_index, target_num_index
+        elapsed = time.perf_counter() - t0
+        _, peak = self._get_memory_mb()
         stats = {
-            "country": country,
-            "s1_entities": n_s1,
-            "target_entities": n_target,
-            "candidates_generated": len(res_df),
-            "avg_candidates_per_entity": avg_cands,
-            "time_sec": elapsed_total,
-            "peak_ram_mb": peak_mb
+            "country": country, "s1_entities": n_s1, "target_entities": n_target,
+            "candidates_generated": total_output_rows,
+            "avg_candidates_per_entity": total_output_rows / max(1, n_s1),
+            "queries_with_candidates": queries_with_candidates,
+            "time_sec": elapsed, "peak_ram_mb": peak,
+            "peak_process_tree_uss_mb": peak_tree_uss_mb,
+            "minimum_available_ram_mb": min_available_ram_mb if min_available_ram_mb != float("inf") else None,
+            "selected_workers": num_workers,
+            "estimated_max_query_postings": max_query_postings,
         }
         if true_matches is not None:
             diagnostics = {
                 "query_entities": n_s1,
-                "queries_with_ground_truth_row": sum(s1_id in true_matches for s1_id in s1_ids),
+                "queries_with_ground_truth_row": sum(s in true_matches for s in s1_ids),
                 "truth_pairs": total_truth_pairs,
                 "target_present_truth_pairs": target_present_pairs,
                 "missing_target_truth_pairs": total_truth_pairs - target_present_pairs,
                 "target_ingestion_coverage": target_present_pairs / total_truth_pairs if total_truth_pairs else 1.0,
-                "survival": {}
+                "survival": {},
             }
-            for stage, found in diagnostic_counts.items():
-                found = int(found)
+            for stage, found in diag.items():
                 diagnostics["survival"][stage] = {
-                    "found_truth_pairs": found,
+                    "found_truth_pairs": int(found),
                     "recall_of_all_truth": found / total_truth_pairs if total_truth_pairs else 1.0,
                     "recall_of_ingested_truth": found / target_present_pairs if target_present_pairs else 1.0,
                 }
             stats["diagnostics"] = add_diagnostic_losses(diagnostics, self.top_k)
             stats["diagnostics"]["ranking_audit"] = self._summarize_ranking_audit(ranking_audit)
-            logger.info("[%s | Diagnostics] %s", country, diagnostics)
-        return res_df, stats
+        logger.info("[%s | Layer 5] Batch blocking complete: %d final candidates in %.2fs", country, total_output_rows, elapsed)
+        return result, stats
 
     @staticmethod
     def _address_jaccard(left: Set[str], right: Set[str]) -> float:
@@ -750,10 +938,14 @@ class MultiLayerBlocker:
                 raise FileNotFoundError(f"Country partition not found: {config.CLEANED_DIR / requested_country}")
         logger.info("Found %d dynamic country partitions under %s", len(country_dirs), config.CLEANED_DIR)
 
-        all_candidate_dfs = []
         country_stats = {}
         evaluated_val_ids = set()
         zero_candidate_entities = 0
+        total_candidates = 0
+        batch_parts_root = config.BLOCKED_DIR / ".batch_parts" / mode
+        if batch_parts_root.exists():
+            for stale_part in batch_parts_root.glob("*/*.parquet"):
+                stale_part.unlink()
 
         for c_dir in country_dirs:
             country = c_dir.name
@@ -776,20 +968,21 @@ class MultiLayerBlocker:
             target_df = pl.concat([pl.read_parquet(f) for f in target_files])
 
             true_matches = self._load_validation_truth(set(s1_df["entity_id"].to_list())) if mode == "val" else None
-            cand_df, stats = self.block_country_partition(country, s1_df, target_df, true_matches=true_matches)
-            zero_candidate_entities += len(s1_df) - cand_df["source1_entity_id"].n_unique()
+            country_parts = batch_parts_root / country
+            cand_df, stats = self.block_country_partition(
+                country, s1_df, target_df, true_matches=true_matches,
+                output_parts_dir=country_parts,
+            )
+            total_candidates += stats["candidates_generated"]
+            zero_candidate_entities += len(s1_df) - int(stats["queries_with_candidates"] or 0)
             if mode == "val":
                 evaluated_val_ids.update(s1_df["entity_id"].to_list())
-            all_candidate_dfs.append(cand_df)
             country_stats[country] = stats
 
             del s1_df, target_df
             gc.collect()
 
-        if all_candidate_dfs:
-            final_cand_df = pl.concat(all_candidate_dfs)
-        else:
-            final_cand_df = pl.DataFrame({
+        empty_candidate_df = pl.DataFrame({
                 "source1_entity_id": pl.Series([], dtype=pl.String),
                 "candidate_entity_id": pl.Series([], dtype=pl.String),
                 "heuristic_score": pl.Series([], dtype=pl.Float32),
@@ -797,28 +990,42 @@ class MultiLayerBlocker:
                 "l2": pl.Series([], dtype=pl.Boolean),
                 "l3": pl.Series([], dtype=pl.Boolean),
                 "l4": pl.Series([], dtype=pl.Boolean)
-            })
+        })
 
         out_parquet = (
             config.BLOCKED_DIR / country_dirs[0].name / f"{mode}_candidates.parquet"
             if requested_country else config.BLOCKED_DIR / f"{mode}_candidates.parquet"
         )
-        self._atomic_write_parquet(final_cand_df, out_parquet)
+        out_parquet.parent.mkdir(parents=True, exist_ok=True)
+        part_files = (
+            sorted((batch_parts_root / country_dirs[0].name).glob("part_*.parquet"))
+            if requested_country else sorted(batch_parts_root.glob("*/*.parquet"))
+        )
+        if part_files:
+            tmp_out = out_parquet.with_name(f"{out_parquet.name}.tmp")
+            pl.concat([pl.scan_parquet(str(path)) for path in part_files], how="vertical").sink_parquet(
+                tmp_out, compression="snappy", maintain_order=True
+            )
+            os.replace(tmp_out, out_parquet)
+            for part_file in part_files:
+                part_file.unlink()
+        else:
+            self._atomic_write_parquet(empty_candidate_df, out_parquet)
         artifact_name = f"{mode}_candidates_{country_dirs[0].name}" if requested_country else f"{mode}_candidates"
-        self.state_manager.record_artifact(artifact_name, out_parquet, len(final_cand_df), meta=country_stats)
+        self.state_manager.record_artifact(artifact_name, out_parquet, total_candidates, meta=country_stats)
 
         if mode == "test":
-            self._export_official_candidate_pairs_tsv(final_cand_df)
+            self._export_official_candidate_pairs_tsv(out_parquet)
 
         recall_est = {"overall": 0.0, "layer2": 0.0, "layer2_3": 0.0, "layer2_3_4": 0.0}
         if mode == "val":
-            recall_est = self._estimate_validation_recall(final_cand_df, evaluated_val_ids)
+            recall_est = self._estimate_validation_recall(out_parquet, evaluated_val_ids)
         diagnostics = self._combine_country_diagnostics(country_stats)
 
         elapsed = time.perf_counter() - t_start
         total_s1_entities = sum(int(stats.get("s1_entities", 0)) for stats in country_stats.values())
         self.state_manager.mark_completed(stage_name, meta={
-            "total_candidates": len(final_cand_df),
+            "total_candidates": total_candidates,
             "time_sec": elapsed,
             "recall_estimate": recall_est["overall"],
             "per_layer_recall": recall_est,
@@ -829,16 +1036,16 @@ class MultiLayerBlocker:
 
         logger.info(
             "[%s Blocking Complete] Total Candidates: %d | Time: %.2fs | Recall Est: %.2f%% | Peak RAM: %.1f MB",
-            mode.upper(), len(final_cand_df), elapsed, recall_est["overall"] * 100.0, self.peak_memory_mb
+            mode.upper(), total_candidates, elapsed, recall_est["overall"] * 100.0, self.peak_memory_mb
         )
 
         return {
             "mode": mode,
-            "total_candidates": len(final_cand_df),
+            "total_candidates": total_candidates,
             "recall_estimate": recall_est["overall"],
             "per_layer_recall": recall_est,
             "zero_candidate_entities": zero_candidate_entities,
-            "avg_candidates_per_entity": len(final_cand_df) / max(1, total_s1_entities),
+            "avg_candidates_per_entity": total_candidates / max(1, total_s1_entities),
             "time_sec": elapsed,
             "peak_ram_mb": self.peak_memory_mb,
             "country_stats": country_stats,
@@ -881,32 +1088,30 @@ class MultiLayerBlocker:
                 truth[s1_id] = {match for match in (matches or "").split(",") if match}
         return truth
 
-    def _export_official_candidate_pairs_tsv(self, cand_df: pl.DataFrame):
+    def _export_official_candidate_pairs_tsv(self, cand_df: Any):
         out_tsv = config.OUTPUT_DIR / "candidate_pairs.tsv"
         config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        
-        grouped = cand_df.group_by("source1_entity_id").agg(
-            pl.col("candidate_entity_id").implode().map_elements(lambda ids: ",".join(ids), return_dtype=pl.String).alias("candidate_entity_ids")
+
+        cand_lf = pl.scan_parquet(cand_df) if isinstance(cand_df, (str, Path)) else cand_df.lazy()
+        grouped = cand_lf.group_by("source1_entity_id", maintain_order=True).agg(
+            pl.col("candidate_entity_id").implode().list.join(",").alias("candidate_entity_ids")
         )
-        
+
         test_s1_files = list(config.CLEANED_DIR.rglob("test_source1_part_*.parquet"))
         if test_s1_files:
-            all_s1_df = pl.concat([pl.read_parquet(f).select("entity_id") for f in test_s1_files]).rename({"entity_id": "source1_entity_id"})
-            merged = all_s1_df.join(grouped, on="source1_entity_id", how="left").with_columns(
+            all_s1_lf = pl.concat([pl.scan_parquet(f).select("entity_id") for f in test_s1_files]).rename({"entity_id": "source1_entity_id"})
+            merged = all_s1_lf.join(grouped, on="source1_entity_id", how="left").with_columns(
                 pl.col("candidate_entity_ids").fill_null("")
             )
         else:
             merged = grouped
 
         tmp_tsv = out_tsv.with_name("candidate_pairs.tsv.tmp")
-        with open(tmp_tsv, "w", encoding="utf-8") as f:
-            f.write("source1_entity_id\tcandidate_entity_ids\n")
-            for s1, c_ids in zip(merged["source1_entity_id"], merged["candidate_entity_ids"]):
-                f.write(f"{s1}\t{c_ids}\n")
+        merged.sink_csv(tmp_tsv, separator="\t")
         os.replace(tmp_tsv, out_tsv)
-        logger.info("Exported official candidate pairs to %s (%d rows)", out_tsv, len(merged))
+        logger.info("Exported official candidate pairs to %s", out_tsv)
 
-    def _estimate_validation_recall(self, val_cand_df: pl.DataFrame, query_ids: Optional[Set[str]] = None) -> Dict[str, float]:
+    def _estimate_validation_recall(self, val_cand_df: Any, query_ids: Optional[Set[str]] = None) -> Dict[str, float]:
         val_gt_files = list(config.VAL_SPLIT_DIR.glob("val_ground_truth_part_*.parquet"))
         if not val_gt_files:
             return {"overall": 0.0, "layer2": 0.0, "layer2_3": 0.0, "layer2_3_4": 0.0}
@@ -924,17 +1129,20 @@ class MultiLayerBlocker:
         if not pairs_set:
             return {"overall": 1.0, "layer2": 1.0, "layer2_3": 1.0, "layer2_3_4": 1.0}
 
-        def recall(mask):
-            subset = val_cand_df.filter(mask)
-            found = len(pairs_set & set(zip(subset["source1_entity_id"], subset["candidate_entity_id"])))
-            return found / len(pairs_set)
-
-        l2 = pl.col("l2")
-        l3 = pl.col("l3")
-        l4 = pl.col("l4")
-        return {
-            "overall": recall(pl.lit(True)),
-            "layer2": recall(l2),
-            "layer2_3": recall(l2 | l3),
-            "layer2_3_4": recall(l2 | l3 | l4),
-        }
+        truth_df = pl.DataFrame({
+            "source1_entity_id": [pair[0] for pair in pairs_set],
+            "candidate_entity_id": [pair[1] for pair in pairs_set],
+        })
+        cand_lf = pl.scan_parquet(val_cand_df) if isinstance(val_cand_df, (str, Path)) else val_cand_df.lazy()
+        found = (
+            cand_lf.join(truth_df.lazy(), on=["source1_entity_id", "candidate_entity_id"], how="inner")
+            .select(
+                pl.len().alias("overall"),
+                pl.col("l2").cast(pl.UInt64).sum().alias("layer2"),
+                (pl.col("l2") | pl.col("l3")).cast(pl.UInt64).sum().alias("layer2_3"),
+                (pl.col("l2") | pl.col("l3") | pl.col("l4")).cast(pl.UInt64).sum().alias("layer2_3_4"),
+            )
+            .collect(engine="streaming")
+            .row(0, named=True)
+        )
+        return {key: value / len(pairs_set) for key, value in found.items()}

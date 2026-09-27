@@ -49,17 +49,18 @@ class PolarsChunkLoader:
         tmp_path = out_path.with_name(f"{out_path.name}.tmp")
         df.write_parquet(tmp_path, compression="snappy")
         os.replace(tmp_path, out_path)
+        StateManager.write_artifact_metadata(out_path, len(df), meta={"stage": "data_loading"})
 
     # --------------------------------------------------------------------------
     # Adjustment 3: Leak-Free Validation Split Selection
     # --------------------------------------------------------------------------
-    def get_or_create_val_ids(self) -> Set[str]:
+    def get_or_create_val_ids(self, force: bool = False) -> Set[str]:
         """
         Deterministically selects 100,000 Source 1 IDs stratified by country
         from train_source1.tsv, with zero ground-truth leakage.
         """
         val_ids_path = config.VAL_SPLIT_DIR / "val_s1_ids.parquet"
-        if val_ids_path.exists():
+        if val_ids_path.exists() and not force:
             df = pl.read_parquet(val_ids_path)
             if "country" in df.columns:
                 return set(df["entity_id"].to_list())
@@ -67,6 +68,8 @@ class PolarsChunkLoader:
             val_ids_path.unlink()
             self._validation_split_rebuilt = True
         else:
+            self._validation_split_rebuilt = True
+        if force:
             self._validation_split_rebuilt = True
 
         logger.info("Sampling 100,000 stratified validation Source 1 IDs (seed=%d)...", config.RANDOM_SEED)
@@ -109,7 +112,8 @@ class PolarsChunkLoader:
         tsv_path: Path,
         val_ids: Optional[Set[str]] = None,
         max_chunks: Optional[int] = None,
-        country: Optional[str] = None
+        country: Optional[str] = None,
+        force: bool = False,
     ) -> Dict[str, Any]:
         """
         Streams a TSV in chunks of config.CHUNK_SIZE rows.
@@ -124,7 +128,9 @@ class PolarsChunkLoader:
         # Register source file fingerprint in manifest
         checkpoint_key = f"{source_key}_{country}" if country else source_key
         src_info = self.state_manager.register_source_file(checkpoint_key, tsv_path)
-        completed_chunks = set(src_info.get("completed_chunks", []))
+        if force:
+            src_info = self.state_manager.reset_source_progress(checkpoint_key)
+        completed_chunks = set() if force else set(src_info.get("completed_chunks", []))
         if source_key == "train_source1" and getattr(self, "_validation_split_rebuilt", False):
             completed_chunks.clear()
 
@@ -155,6 +161,7 @@ class PolarsChunkLoader:
             
             # Check if this chunk was already processed and verified
             if chunk_idx in completed_chunks:
+                self.state_manager.verify_chunk_artifacts(checkpoint_key, chunk_idx)
                 logger.info("[%s | Chunk %04d] Already completed — skipping.", source_key, chunk_idx)
                 chunk_idx += 1
                 total_rows_processed += chunk_rows
@@ -239,7 +246,8 @@ class PolarsChunkLoader:
         self,
         val_ids: Set[str],
         tsv_path: Optional[Path] = None,
-        max_chunks: Optional[int] = None
+        max_chunks: Optional[int] = None,
+        force: bool = False,
     ) -> Dict[str, Any]:
         """
         Streams train_ground_truth.tsv in chunks.
@@ -250,7 +258,9 @@ class PolarsChunkLoader:
         source_key = "train_ground_truth"
         
         src_info = self.state_manager.register_source_file(source_key, tsv_path)
-        completed_chunks = set(src_info.get("completed_chunks", []))
+        if force:
+            src_info = self.state_manager.reset_source_progress(source_key)
+        completed_chunks = set() if force else set(src_info.get("completed_chunks", []))
         if getattr(self, "_validation_split_rebuilt", False):
             completed_chunks.clear()
         
@@ -272,6 +282,7 @@ class PolarsChunkLoader:
         for chunk_df in batch_iter:
             chunk_rows = len(chunk_df)
             if chunk_idx in completed_chunks:
+                self.state_manager.verify_chunk_artifacts(source_key, chunk_idx)
                 chunk_idx += 1
                 total_rows += chunk_rows
                 if max_chunks and chunk_idx >= max_chunks:

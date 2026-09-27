@@ -79,7 +79,15 @@ if __name__ == "__main__":
     stop_event.set()
     monitor_thread.join(timeout=2.0)
 
-    logger.info("Parallel Finished in %.2fs (Peak RAM: %.1f MB)", total_time_par, ram_peak_par)
+    logger.info(
+        "Parallel Finished in %.2fs (Selected workers: %d; Parent peak RSS: %.1f MB; "
+        "Process-tree peak USS: %.1f MB; Minimum available RAM: %.1f MB)",
+        total_time_par,
+        stats_par.get("selected_workers", benchmark_workers),
+        ram_peak_par,
+        stats_par.get("peak_process_tree_uss_mb", 0.0),
+        stats_par.get("minimum_available_ram_mb") or 0.0,
+    )
     logger.info("Parallel Stats: %s", stats_par["diagnostics"]["survival"])
 
     # Average CPU utilization per core during parallel run
@@ -94,6 +102,6 @@ if __name__ == "__main__":
     logger.info("=== SUMMARY REPORT ===")
     logger.info("Queries:                  %d", len(s1_df))
     logger.info("Target records:           %d", len(target_df))
-    logger.info("Workers:                  %d", benchmark_workers)
+    logger.info("Selected workers:         %d", stats_par.get("selected_workers", benchmark_workers))
     logger.info("Parallel Total Time:      %.2fs", total_time_par)
     logger.info("Peak RAM Parallel:        %.1f MB", ram_peak_par)

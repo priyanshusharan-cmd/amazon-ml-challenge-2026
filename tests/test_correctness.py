@@ -8,7 +8,12 @@ import numpy as np
 import polars as pl
 import scipy.sparse as sp
 
-from src.blocking import MultiLayerBlocker, accumulate_tfidf_scores
+from src.blocking import (
+    MultiLayerBlocker,
+    accumulate_tfidf_scores,
+    score_tfidf_query_sparse,
+    select_layer4_worker_count,
+)
 from src.config import config
 from src.data_loader import PolarsChunkLoader
 from src.feature_engineering import FeatureExtractor
@@ -17,6 +22,34 @@ from src.state_manager import StateManager
 
 
 class CorrectnessTests(unittest.TestCase):
+    def test_layer4_worker_count_respects_cpu_and_ram_budget(self):
+        gib = 1024 ** 3
+        workers, plan = select_layer4_worker_count(
+            n_queries=40_021,
+            n_targets=300_000,
+            indices_dtype=np.dtype(np.int32),
+            cpu_count=16,
+            available_ram_bytes=13 * gib,
+            total_ram_bytes=16 * gib,
+        )
+        self.assertEqual(workers, 16)
+        self.assertLessEqual(workers, plan["cpu_limit"])
+        self.assertEqual(plan["reserved_ram_bytes"], 3 * gib)
+        self.assertLessEqual(
+            workers * plan["estimated_worker_ram_bytes"],
+            plan["available_ram_bytes"] - plan["reserved_ram_bytes"],
+        )
+
+        low_memory_workers, _ = select_layer4_worker_count(
+            n_queries=40_021,
+            n_targets=300_000,
+            indices_dtype=np.dtype(np.int32),
+            cpu_count=16,
+            available_ram_bytes=4 * gib,
+            total_ram_bytes=16 * gib,
+        )
+        self.assertLess(low_memory_workers, workers)
+
     def test_score_accumulation_matches_unique_bincount_reduction(self):
         target = sp.csr_matrix(np.array([
             [0.5, 0.0, 0.25],
@@ -38,8 +71,11 @@ class CorrectnessTests(unittest.TestCase):
         actual = np.zeros(target.shape[0], dtype=np.float64)
         touched = np.empty(target.shape[0], dtype=target.indices.dtype)
         reached = accumulate_tfidf_scores(target, features, weights, actual, touched)
+        sparse_ids, sparse_scores = score_tfidf_query_sparse(target, features, weights)
         np.testing.assert_array_equal(reached, ids)
         np.testing.assert_array_equal(actual[ids], expected)
+        np.testing.assert_array_equal(sparse_ids, ids)
+        np.testing.assert_array_equal(sparse_scores, expected)
         legacy_candidates = ids[expected >= 0.15]
         legacy_scores = expected[expected >= 0.15]
         legacy_top = np.argpartition(legacy_scores, -2)[-2:]
@@ -69,8 +105,17 @@ class CorrectnessTests(unittest.TestCase):
             blocker = MultiLayerBlocker(state_manager=state, top_k=2, layer4_internal_top_k=3)
             first, first_stats = blocker.block_country_partition("US", s1, targets, truth)
             second, second_stats = blocker.block_country_partition("US", s1, targets, truth)
+            streamed, streamed_stats = blocker.block_country_partition(
+                "US", s1, targets, truth, output_parts_dir=root / "parts"
+            )
+            streamed_rows = pl.concat([
+                pl.read_parquet(path) for path in (root / "parts").glob("part_*.parquet")
+            ])
 
         self.assertTrue(first.equals(second))
+        self.assertTrue(first.equals(streamed_rows))
+        self.assertEqual(streamed.height, 0)
+        self.assertEqual(streamed_stats["candidates_generated"], len(first))
         self.assertLessEqual(first.group_by("source1_entity_id").len()["len"].max(), 2)
         self.assertEqual(first.schema, second.schema)
         self.assertEqual(first_stats["diagnostics"], second_stats["diagnostics"])

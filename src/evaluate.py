@@ -137,9 +137,11 @@ class ThresholdOptimizer:
 
         out_json = config.MODELS_DIR / "optimal_threshold.json"
         res_data = {"optimal_threshold": best_tau, "validation_metrics": best_metrics}
-        
-        with open(out_json, "w", encoding="utf-8") as f:
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        tmp_json = out_json.with_name(f"{out_json.name}.tmp")
+        with open(tmp_json, "w", encoding="utf-8") as f:
             json.dump(res_data, f, indent=2)
+        tmp_json.replace(out_json)
             
         self.state_manager.record_artifact("optimal_threshold", out_json, row_count=1, meta=res_data)
         return res_data

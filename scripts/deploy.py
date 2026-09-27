@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -23,6 +24,11 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 logger = logging.getLogger("KaggleDeployer")
+
+
+def _data_rows(path: Path) -> int:
+    with path.open(encoding="utf-8") as stream:
+        return max(0, sum(1 for _ in stream) - 1)
 
 
 class KaggleDeployer:
@@ -113,7 +119,8 @@ class KaggleDeployer:
                     "    shutil.copy2(PROJECT / 'output' / name, Path('/kaggle/working') / name)\n",
                     "for name in ('model.pkl', 'optimal_threshold.json'):\n",
                     "    p = PROJECT / 'artifacts' / 'models' / name\n",
-                    "    if p.exists(): shutil.copy2(p, Path('/kaggle/working') / name)\n",
+                    "    assert p.is_file(), f'Required model artifact is missing: {p}'\n",
+                    "    shutil.copy2(p, Path('/kaggle/working') / name)\n",
                     "print('Submission outputs written to /kaggle/working')\n"
                 ]}
             ],
@@ -130,7 +137,7 @@ class KaggleDeployer:
             "language": "python",
             "kernel_type": "notebook",
             "is_private": "true",
-            "enable_gpu": "false",
+            "enable_gpu": "true",
             "enable_tpu": "false",
             "enable_internet": "false",
             "dataset_sources": [f"{config.KAGGLE_USERNAME}/{config.KAGGLE_DATASET_SLUG}"],
@@ -140,6 +147,9 @@ class KaggleDeployer:
 
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta_content, f, indent=2)
+
+        StateManager.write_artifact_metadata(meta_dir / "kaggle_runner.ipynb", len(notebook["cells"]), meta={"kind": "generated_kernel_notebook"})
+        StateManager.write_artifact_metadata(meta_path, 1, meta={"kind": "kaggle_kernel_metadata"})
             
         logger.info("[Kaggle CLI] Metadata created at %s", meta_path)
         return meta_path
@@ -175,25 +185,35 @@ class KaggleDeployer:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info("[Kaggle CLI] Pulling output artifacts from kernel '%s/%s'...", config.KAGGLE_USERNAME, config.KAGGLE_KERNEL_SLUG)
-        res = subprocess.run([
-            str(self.kaggle_exe), "kernels", "output",
-            f"{config.KAGGLE_USERNAME}/{config.KAGGLE_KERNEL_SLUG}",
-            "-p", str(models_dir)
-        ], capture_output=True, text=True)
+        with tempfile.TemporaryDirectory(prefix="kaggle-kernel-output-") as temp_dir:
+            res = subprocess.run([
+                str(self.kaggle_exe), "kernels", "output",
+                f"{config.KAGGLE_USERNAME}/{config.KAGGLE_KERNEL_SLUG}",
+                "-p", temp_dir
+            ], capture_output=True, text=True)
+            if res.returncode:
+                raise RuntimeError(f"Kaggle output download failed: {res.stdout.strip() or res.stderr.strip()}")
+            downloaded = Path(temp_dir)
+            required = ["matching_results.tsv", "candidate_pairs.tsv", "model.pkl", "optimal_threshold.json"]
+            missing = [name for name in required if not (downloaded / name).is_file()]
+            if missing:
+                raise FileNotFoundError(f"Kaggle run output is missing required artifacts: {', '.join(missing)}")
 
-        if res.returncode == 0:
-            logger.info("[Kaggle CLI] Raw output artifacts downloaded to %s", models_dir)
-            matching_src = models_dir / "matching_results.tsv"
-            candidate_src = models_dir / "candidate_pairs.tsv"
-            missing_remote = [str(p.name) for p in (matching_src, candidate_src) if not p.exists()]
-            if missing_remote:
-                raise FileNotFoundError(f"Kaggle run output is missing required artifacts: {', '.join(missing_remote)}")
-            
-            shutil.copy2(matching_src, output_dir / matching_src.name)
-            shutil.copy2(candidate_src, output_dir / candidate_src.name)
-            logger.info("[Artifact Router] Copied submission TSVs into %s", output_dir)
-        else:
-            raise RuntimeError(f"Kaggle output download failed: {res.stdout.strip() or res.stderr.strip()}")
+            for name in required:
+                source = downloaded / name
+                destination = output_dir / name if name.endswith(".tsv") else models_dir / name
+                shutil.copy2(source, destination)
+                rows = _data_rows(destination) if name.endswith(".tsv") else 1
+                StateManager.write_artifact_metadata(destination, rows, meta={"source": "kaggle_kernel_output"})
+        logger.info("[Artifact Router] Copied predictions to %s and model artifacts to %s", output_dir, models_dir)
+
+    def show_kernel_status(self) -> str:
+        kernel_id = f"{config.KAGGLE_USERNAME}/{config.KAGGLE_KERNEL_SLUG}"
+        result = subprocess.run([str(self.kaggle_exe), "kernels", "status", kernel_id], capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError(f"Kaggle kernel status failed: {result.stderr.strip() or result.stdout.strip()}")
+        print(result.stdout.strip())
+        return result.stdout.strip()
 
 
 if __name__ == "__main__":
@@ -202,12 +222,16 @@ if __name__ == "__main__":
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--push", action="store_true", help="Push kernel to Kaggle Cloud and start remote execution")
     group.add_argument("--download-only", action="store_true", help="Download output artifacts from existing Kaggle run without pushing")
+    group.add_argument("--download", action="store_true", help="Alias for --download-only")
+    group.add_argument("--status", action="store_true", help="Show the current Kaggle kernel run status")
     group.add_argument("--dry-run", action="store_true", help="Verify deployment configuration without pushing or downloading")
     args = parser.parse_args()
 
     deployer = KaggleDeployer()
-    if args.download_only:
+    if args.download_only or args.download:
         deployer.download_artifacts()
+    elif args.status:
+        deployer.show_kernel_status()
     elif args.push:
         deployer.deploy_kernel(dry_run=False)
     else:
