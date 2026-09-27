@@ -18,7 +18,7 @@ class PipelineConfig:
     )).resolve()
     DATASET_DIR: Path = Path(os.environ.get(
         "AMAZON_ML_DATASET_DIR",
-        "/kaggle/input/amazon-ml-2026-dataset" if Path("/kaggle/input/amazon-ml-2026-dataset").exists()
+        "/kaggle/input/ca231bbc41b6705c6266d7b96e79069bbd9bd14806587574c14a7e89ef1b62aa" if Path("/kaggle/input/ca231bbc41b6705c6266d7b96e79069bbd9bd14806587574c14a7e89ef1b62aa").exists()
         else str(Path(os.environ.get("AMAZON_ML_BASE_DIR", Path(__file__).resolve().parent.parent)) / "dataset")
     )).resolve()
     ARTIFACTS_DIR: Path = BASE_DIR / 'artifacts'
@@ -76,6 +76,6 @@ class PipelineConfig:
     # --- Kaggle CLI Integration Settings ---
     KAGGLE_USERNAME: str = 'ashash77'
     KAGGLE_KERNEL_SLUG: str = 'amazon-ml-2026-gbdt'
-    KAGGLE_DATASET_SLUG: str = 'amazon-ml-2026-dataset'
+    KAGGLE_DATASET_SLUG: str = 'ca231bbc41b6705c6266d7b96e79069bbd9bd14806587574c14a7e89ef1b62aa'
 
 config = PipelineConfig()
