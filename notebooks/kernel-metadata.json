@@ -1,11 +1,11 @@
 {
-  "id": "ashash77/amazon-ml-2026-gbdt",
+  "id": "ashash77/amazon-ml-challenge-2026-gbdt-entity-resolution",
   "title": "Amazon ML Challenge 2026 \u2014 GBDT Entity Resolution",
   "code_file": "kaggle_runner.ipynb",
   "language": "python",
   "kernel_type": "notebook",
   "is_private": "true",
-  "enable_gpu": "false",
+  "enable_gpu": "true",
   "enable_tpu": "false",
   "enable_internet": "false",
   "dataset_sources": [

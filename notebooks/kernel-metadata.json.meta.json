@@ -1,0 +1,11 @@
+{
+  "path": "/home/arsh/business-entity/amazon-ml-2026/notebooks/kernel-metadata.json",
+  "size_bytes": 452,
+  "row_count": 1,
+  "timestamp": "2026-09-27T10:59:56Z",
+  "git_commit": "40c01b58640eebf262a80509382e37c1589dafbc",
+  "config_hash": "90f55ee943241646",
+  "metadata": {
+    "kind": "kaggle_kernel_metadata"
+  }
+}

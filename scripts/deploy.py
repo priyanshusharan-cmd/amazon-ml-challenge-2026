@@ -164,7 +164,8 @@ class KaggleDeployer:
                 "PROJECT.mkdir(parents=True, exist_ok=True)\n",
                 "with zipfile.ZipFile(io.BytesIO(base64.b64decode(BUNDLE_B64))) as zf: zf.extractall(PROJECT)\n",
                 "os.environ['AMAZON_ML_BASE_DIR'] = str(PROJECT)\n",
-                f"os.environ['AMAZON_ML_DATASET_DIR'] = '/kaggle/input/{config.KAGGLE_DATASET_SLUG.split('/')[-1]}'\n",
+                f"raw_ds = Path('/kaggle/input/{config.KAGGLE_DATASET_SLUG.split('/')[-1]}')\n",
+                "os.environ['AMAZON_ML_DATASET_DIR'] = str(raw_ds / 'dataset' if (raw_ds / 'dataset').exists() else raw_ds)\n",
                 "sys.path.insert(0, str(PROJECT))\n",
             ]}
         ]
