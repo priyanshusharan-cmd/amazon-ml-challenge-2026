@@ -1,0 +1,32 @@
+stage2 rows 2860240 rss=2.00GB free=7.10GB
+Training until validation scores don't improve for 100 rounds
+[500]	valid_0's binary_logloss: 0.0256513
+[1000]	valid_0's binary_logloss: 0.0251641
+Early stopping, best iteration is:
+[1195]	valid_0's binary_logloss: 0.0250938
+h features (10320219, 15) rss=3.45GB free=5.67GB
+stage3 rows 2861407 rss=3.18GB free=5.88GB
+Training until validation scores don't improve for 100 rounds
+[500]	valid_0's binary_logloss: 0.0248982
+Early stopping, best iteration is:
+[662]	valid_0's binary_logloss: 0.0247988
+top: [('q2', 20027879), ('margin12', 4484364), ('p1', 1781828), ('h_g_psum', 46466), ('g_psum', 45635), ('g_all', 30972), ('h_sup_nums_conf', 26858), ('num_q_cov', 26603), ('p2', 20940), ('h_sup_nums_frac', 18929), ('full_ratio', 17903), ('ad_len_s', 17481)]
+t=0.450 F=0.98486 P=0.99047 R=0.97222 h0=0.98493 h1=0.98479
+t=0.475 F=0.98508 P=0.99086 R=0.97182 h0=0.98510 h1=0.98506
+t=0.500 F=0.98523 P=0.99117 R=0.97140 h0=0.98525 h1=0.98520
+t=0.525 F=0.98535 P=0.99146 R=0.97096 h0=0.98536 h1=0.98534
+t=0.550 F=0.98544 P=0.99171 R=0.97051 h0=0.98546 h1=0.98542
+t=0.575 F=0.98554 P=0.99197 R=0.97009 h0=0.98559 h1=0.98549
+t=0.600 F=0.98563 P=0.99224 R=0.96963 h0=0.98567 h1=0.98560
+t=0.625 F=0.98567 P=0.99245 R=0.96915 h0=0.98571 h1=0.98564
+t=0.650 F=0.98571 P=0.99265 R=0.96868 h0=0.98574 h1=0.98567
+t=0.675 F=0.98570 P=0.99282 R=0.96817 h0=0.98575 h1=0.98565
+t=0.700 F=0.98565 P=0.99294 R=0.96761 h0=0.98570 h1=0.98560
+t=0.725 F=0.98556 P=0.99301 R=0.96706 h0=0.98564 h1=0.98548
+t=0.750 F=0.98545 P=0.99310 R=0.96640 h0=0.98555 h1=0.98536
+t=0.775 F=0.98532 P=0.99317 R=0.96570 h0=0.98538 h1=0.98526
+t=0.800 F=0.98513 P=0.99322 R=0.96485 h0=0.98521 h1=0.98506
+t=0.825 F=0.98493 P=0.99327 R=0.96397 h0=0.98499 h1=0.98487
+t=0.850 F=0.98459 P=0.99322 R=0.96283 h0=0.98468 h1=0.98450
+stage-2 (H0 fit) best F: (0.9853562280145968, 0.675)
+[E04_stage3_iter] F=0.98571 P=0.99265 R=0.96868 F_h0=0.98574 F_h1=0.98567 F_India=0.98399 F_US=0.98685 threshold=0.65000 delta=+0.00031 stage3: group feats recomputed from stage-2 probs

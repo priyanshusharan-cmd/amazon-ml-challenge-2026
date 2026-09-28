@@ -1,0 +1,10 @@
+ctx rss=2.42GB free=6.36GB
+0 rss=1.51GB free=7.27GB
+1500000 rss=1.53GB free=7.25GB
+3000000 rss=2.02GB free=6.77GB
+4500000 rss=2.10GB free=6.69GB
+6000000 rss=2.15GB free=6.64GB
+7500000 rss=1.90GB free=6.88GB
+9000000 rss=2.21GB free=6.58GB
+qtable (10320219, 9) rss=1.71GB free=6.81GB
+argmax agrees with baseline: 1.0  p1 max abs diff: 0.0

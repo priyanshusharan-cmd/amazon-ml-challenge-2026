@@ -1,0 +1,32 @@
+stage2 rows 2860240 rss=2.85GB free=6.12GB
+Training until validation scores don't improve for 100 rounds
+[500]	valid_0's binary_logloss: 0.0227084
+[1000]	valid_0's binary_logloss: 0.0222782
+Early stopping, best iteration is:
+[1158]	valid_0's binary_logloss: 0.0222184
+h features (10320219, 15) rss=3.89GB free=5.17GB
+stage3 rows 2861407 rss=3.06GB free=6.00GB
+Training until validation scores don't improve for 100 rounds
+[500]	valid_0's binary_logloss: 0.0212594
+Early stopping, best iteration is:
+[662]	valid_0's binary_logloss: 0.0211608
+top: [('q2', 19070577), ('margin12', 5329044), ('p1', 1916486), ('fz_addr_r_non', 115471), ('fz_both_non', 51450), ('h_g_psum', 41636), ('num_q_cov', 38374), ('p2', 33978), ('h_sup_nums_conf', 30866), ('g_psum', 22496), ('p3', 20118), ('full_ratio', 16069)]
+t=0.450 F=0.98573 P=0.99129 R=0.97284 h0=0.98577 h1=0.98569
+t=0.475 F=0.98595 P=0.99166 R=0.97252 h0=0.98598 h1=0.98592
+t=0.500 F=0.98612 P=0.99198 R=0.97218 h0=0.98617 h1=0.98608
+t=0.525 F=0.98630 P=0.99229 R=0.97186 h0=0.98634 h1=0.98625
+t=0.550 F=0.98642 P=0.99257 R=0.97146 h0=0.98645 h1=0.98638
+t=0.575 F=0.98652 P=0.99281 R=0.97109 h0=0.98658 h1=0.98645
+t=0.600 F=0.98658 P=0.99301 R=0.97071 h0=0.98667 h1=0.98649
+t=0.625 F=0.98661 P=0.99318 R=0.97030 h0=0.98669 h1=0.98652
+t=0.650 F=0.98660 P=0.99332 R=0.96988 h0=0.98670 h1=0.98651
+t=0.675 F=0.98659 P=0.99344 R=0.96948 h0=0.98671 h1=0.98647
+t=0.700 F=0.98655 P=0.99353 R=0.96905 h0=0.98669 h1=0.98642
+t=0.725 F=0.98644 P=0.99357 R=0.96853 h0=0.98657 h1=0.98632
+t=0.750 F=0.98635 P=0.99364 R=0.96797 h0=0.98649 h1=0.98621
+t=0.775 F=0.98624 P=0.99372 R=0.96732 h0=0.98639 h1=0.98609
+t=0.800 F=0.98607 P=0.99373 R=0.96667 h0=0.98622 h1=0.98592
+t=0.825 F=0.98589 P=0.99375 R=0.96597 h0=0.98599 h1=0.98579
+t=0.850 F=0.98563 P=0.99374 R=0.96505 h0=0.98575 h1=0.98552
+stage-2 (H0 fit) best F: (0.9861732292942857, 0.7)
+[E06_stage3_iter_fuzzy] F=0.98661 P=0.99318 R=0.97030 F_h0=0.98669 F_h1=0.98652 F_India=0.98495 F_US=0.98772 threshold=0.62500 delta=+0.00053 stage3: group feats recomputed from stage-2 probs + ['fz_train.parquet']

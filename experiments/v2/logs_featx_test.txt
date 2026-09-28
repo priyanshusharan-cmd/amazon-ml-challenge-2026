@@ -1,0 +1,10 @@
+s1 tokens rss=1.98GB free=7.95GB
+  q_ntok rss=2.87GB free=6.96GB
+  q_atok rss=2.44GB free=7.30GB
+  q_nums rss=1.58GB free=8.41GB
+q tokens rss=1.37GB free=8.49GB
+loaded token tables rss=2.80GB free=7.10GB
+[1/53] France_000000000.parquet 2,000,000 rss=3.42GB free=6.64GB
+[2/53] France_000200000.parquet 2,000,000 rss=3.70GB free=6.36GB
+[3/53] France_000400000.parquet 2,000,000 rss=3.76GB free=6.31GB
+[4/53] France_000600000.parquet 2,000,000 rss=3.92GB free=6.17GB

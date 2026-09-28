@@ -1,0 +1,29 @@
+  fit rows=2,999,980 rss=3.35GB free=5.57GB
+Training until validation scores don't improve for 100 rounds
+Early stopping, best iteration is:
+[683]	valid_0's binary_logloss: 0.0223213
+  fit rows=2,999,976 rss=3.36GB free=5.99GB
+Training until validation scores don't improve for 100 rounds
+[1000]	valid_0's binary_logloss: 0.022874
+Early stopping, best iteration is:
+[1134]	valid_0's binary_logloss: 0.0227862
+stage2 done rss=4.96GB free=4.43GB
+  fit rows=4,999,978 rss=4.63GB free=4.88GB
+Training until validation scores don't improve for 100 rounds
+[1000]	valid_0's binary_logloss: 0.0208898
+Early stopping, best iteration is:
+[1457]	valid_0's binary_logloss: 0.0208468
+t=0.500 F=0.98631 P=0.99217 R=0.97231 h0=0.98632 h1=0.98630
+t=0.525 F=0.98647 P=0.99247 R=0.97198 h0=0.98649 h1=0.98645
+t=0.550 F=0.98659 P=0.99273 R=0.97162 h0=0.98665 h1=0.98653
+t=0.575 F=0.98669 P=0.99297 R=0.97124 h0=0.98679 h1=0.98658
+t=0.600 F=0.98674 P=0.99317 R=0.97084 h0=0.98685 h1=0.98663
+t=0.625 F=0.98675 P=0.99334 R=0.97037 h0=0.98684 h1=0.98666
+t=0.650 F=0.98677 P=0.99350 R=0.96997 h0=0.98689 h1=0.98665
+t=0.675 F=0.98674 P=0.99362 R=0.96951 h0=0.98688 h1=0.98660
+t=0.700 F=0.98670 P=0.99372 R=0.96907 h0=0.98681 h1=0.98659
+t=0.725 F=0.98663 P=0.99379 R=0.96862 h0=0.98675 h1=0.98652
+t=0.750 F=0.98652 P=0.99381 R=0.96811 h0=0.98667 h1=0.98637
+t=0.775 F=0.98638 P=0.99385 R=0.96749 h0=0.98652 h1=0.98624
+t=0.800 F=0.98620 P=0.99387 R=0.96676 h0=0.98633 h1=0.98607
+[E07_crossfit] F=0.98677 P=0.99350 R=0.96997 F_h0=0.98689 F_h1=0.98665 F_India=0.98523 F_US=0.98780 threshold=0.65000 delta=+0.00016 cross-fitted stage2 + stage3 on full pool rows3=5000000 leaves=127

@@ -1,0 +1,15 @@
+qtable_test 0 rss=1.18GB free=8.18GB
+qtable_test 1500000 rss=1.30GB free=8.05GB
+qtable_test 3000000 rss=1.44GB free=7.91GB
+qtable_test 4500000 rss=1.45GB free=7.89GB
+qtable_test 6000000 rss=1.53GB free=7.83GB
+qtable_test 7500000 rss=1.59GB free=7.75GB
+qtable_test 9000000 rss=1.36GB free=7.97GB
+group features (9969589, 19) rss=4.34GB free=4.91GB
+France_000000000.parquet (200000, 83) rss=3.71GB free=5.53GB
+India_000400000.parquet (152566, 83) rss=3.99GB free=5.19GB
+India_002400000.parquet (173237, 83) rss=3.63GB free=5.54GB
+India_004400000.parquet (173360, 83) rss=3.25GB free=5.92GB
+US_001400000.parquet (200000, 83) rss=3.59GB free=5.56GB
+US_003400000.parquet (200000, 83) rss=3.54GB free=5.61GB
+done rss=3.14GB free=6.01GB

@@ -1,0 +1,52 @@
+raw loaded rss=2.92GB free=5.92GB
+feats loaded 25641 rss=2.08GB free=6.76GB
+
+FP reasons (top-15000 by confidence):
+shape: (18, 3)
+┌─────────────────┬─────────────────────────┬──────┐
+│ cls             ┆ reason                  ┆ len  │
+│ ---             ┆ ---                     ┆ ---  │
+│ str             ┆ str                     ┆ u32  │
+╞═════════════════╪═════════════════════════╪══════╡
+│ FP_distractor   ┆ extra_or_changed_number ┆ 2919 │
+│ FP_distractor   ┆ numeric_mismatch        ┆ 2284 │
+│ FP_distractor   ┆ near_identical          ┆ 1496 │
+│ FP_distractor   ┆ name_word_changed       ┆ 1297 │
+│ FP_wrong_s1     ┆ no_address_name_only    ┆ 1106 │
+│ FP_distractor   ┆ address_token_changed   ┆ 358  │
+│ FP_wrong_s1     ┆ name_word_changed       ┆ 251  │
+│ FP_distractor   ┆ no_address_name_only    ┆ 212  │
+│ FP_singleton_s1 ┆ no_address_name_only    ┆ 113  │
+│ FP_singleton_s1 ┆ near_identical          ┆ 110  │
+│ FP_singleton_s1 ┆ extra_or_changed_number ┆ 105  │
+│ FP_wrong_s1     ┆ near_identical          ┆ 96   │
+│ FP_singleton_s1 ┆ name_word_changed       ┆ 95   │
+│ FP_singleton_s1 ┆ numeric_mismatch        ┆ 60   │
+│ FP_wrong_s1     ┆ extra_or_changed_number ┆ 52   │
+│ FP_wrong_s1     ┆ address_token_changed   ┆ 31   │
+│ FP_wrong_s1     ┆ numeric_mismatch        ┆ 29   │
+│ FP_singleton_s1 ┆ address_token_changed   ┆ 27   │
+└─────────────────┴─────────────────────────┴──────┘
+
+FN reason (all validation FNs):
+shape: (2, 2)
+┌──────┬───────┐
+│ AB   ┆ len   │
+│ ---  ┆ ---   │
+│ str  ┆ u32   │
+╞══════╪═══════╡
+│ FN_B ┆ 48915 │
+│ FN_A ┆ 19828 │
+└──────┴───────┘
+FN with empty candidate address, by class:
+shape: (3, 3)
+┌──────────────────────┬──────┬──────────────────┐
+│ cls                  ┆ len  ┆ share_no_address │
+│ ---                  ┆ ---  ┆ ---              │
+│ str                  ┆ u32  ┆ f32              │
+╞══════════════════════╪══════╪══════════════════╡
+│ FN_A_not_retrieved   ┆ 4349 ┆ 0.719476         │
+│ FN_B_below_threshold ┆ 7937 ┆ 0.197808         │
+│ FN_B_best_wrong      ┆ 2714 ┆ 0.824245         │
+└──────────────────────┴──────┴──────────────────┘
+rss=2.05GB free=6.76GB

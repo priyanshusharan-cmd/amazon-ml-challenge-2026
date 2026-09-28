@@ -1,0 +1,9 @@
+a) global best t=0.65 F=0.98677 h0=0.98689 h1=0.98665
+b) no-address records: t_h0=0.675 t_h1=0.675 cross-fitted F=0.98679 (global 0.98677, delta +0.00002)
+b) Source-3 records: t_h0=0.675 t_h1=0.65 cross-fitted F=0.98676 (global 0.98677, delta -0.00001)
+c) first/additional thresholds: best_h0=('first', np.float64(0.575)) best_h1=('first', np.float64(0.5)) cross-fitted F=0.98685 (delta +0.00008)
+d) expected-F0.5 per S1: F=0.98690 (delta +0.00013) h0=0.98695 h1=0.98685
+   + min p 0.3: F=0.98690 (delta +0.00013)
+   + min p 0.4: F=0.98690 (delta +0.00013)
+   + min p 0.5: F=0.98695 (delta +0.00018)
+rss=2.93GB free=6.43GB

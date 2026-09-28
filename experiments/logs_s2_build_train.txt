@@ -1,0 +1,7 @@
+group features (10320219, 19) rss=4.80GB free=3.98GB
+India_000000000.parquet (306879, 83) rss=3.26GB free=5.46GB
+India_004000000.parquet (115773, 83) rss=3.62GB free=4.94GB
+US_001600000.parquet (200000, 83) rss=3.26GB free=5.36GB
+US_003600000.parquet (200000, 83) rss=4.33GB free=4.32GB
+US_005600000.parquet (200000, 83) rss=3.73GB free=4.91GB
+done rss=3.16GB free=5.49GB

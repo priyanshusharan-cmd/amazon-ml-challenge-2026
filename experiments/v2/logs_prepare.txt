@@ -1,0 +1,33 @@
+shape: (3, 2)
+┌───────┬─────────┐
+│ fold  ┆ len     │
+│ ---   ┆ ---     │
+│ str   ┆ u32     │
+╞═══════╪═════════╡
+│ CONF  ┆ 441335  │
+│ TRAIN ┆ 1323831 │
+│ DEV   ┆ 441655  │
+└───────┴─────────┘
+NOTE: v2 Indic dictionary from TRAIN fold only: 526 entries (v1 fold-A dict: 526; overlap 526)
+v2train_source2: 474,345 Indic-script names, 0 changed by dictionary
+v2train_source3: 278,524 Indic-script names, 0 changed by dictionary
+v2test_source2: 546,606 Indic-script names, 0 changed by dictionary
+v2test_source3: 320,639 Indic-script names, 0 changed by dictionary
+[v2train/India] re-generated candidates for 752,869 has_indic queries (183s)
+NOTE: v2train candidates ready: 103,202,190 pairs
+Traceback (most recent call last):
+  File "/Users/priyanshusharan/Documents/project/amazon-ml-challenge-2026/experiments/v2/v2_prepare.py", line 74, in <module>
+    candidates.patch_queries(dst)
+  File "/Users/priyanshusharan/Documents/project/amazon-ml-challenge-2026/business_entity_resolution/src/candidates.py", line 115, in patch_queries
+    keep.write_parquet(f)
+  File "/Users/priyanshusharan/Documents/project/amazon-ml-challenge-2026/.venv/lib/site-packages/polars/dataframe/frame.py", line 4375, in write_parquet
+    self.lazy().sink_parquet(
+  File "/Users/priyanshusharan/Documents/project/amazon-ml-challenge-2026/.venv/lib/site-packages/polars/lazyframe/frame.py", line 3021, in sink_parquet
+    return _select_engine(engine).sink_parquet(
+  File "/Users/priyanshusharan/Documents/project/amazon-ml-challenge-2026/.venv/lib/site-packages/polars/lazyframe/engine.py", line 616, in sink_parquet
+    return self._finish_sink(ldf_py, lazy=lazy, optimizations=optimizations)
+  File "/Users/priyanshusharan/Documents/project/amazon-ml-challenge-2026/.venv/lib/site-packages/polars/lazyframe/engine.py", line 522, in _finish_sink
+    self.collect(lf, optimizations=optimizations)
+  File "/Users/priyanshusharan/Documents/project/amazon-ml-challenge-2026/.venv/lib/site-packages/polars/lazyframe/engine.py", line 443, in collect
+    return wrap_df(ldf.collect(self.name, callback))
+OSError: The requested operation cannot be performed on a file with a user-mapped section open. (os error 1224): ...ktop/amazon Ml/amazon-ml-challenge-2026/cache/v2test_cands/India_patch_has_indic.parquet (set POLARS_VERBOSE=1 to see full path)

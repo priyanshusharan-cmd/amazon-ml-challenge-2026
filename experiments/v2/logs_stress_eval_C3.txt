@@ -1,0 +1,82 @@
+{
+ "model": "model_C3_direct_x_more_data",
+ "t": 0.7,
+ "F_stress_all_DEV": 0.9820550546889227,
+ "F_twins": 0.9760549220963713,
+ "n_twins": 121347,
+ "F_twins_zero_match": 0.9690103785996199,
+ "n_twins_zero": 6841,
+ "F_clean_same_entities": 0.9824704021068313,
+ "distractor_records": 107119,
+ "distractor_accept_rate": 0.0179146556633277,
+ "distractor_accept_by_cluster_size": [
+  {
+   "cluster_size": 1,
+   "len": 1718,
+   "accept": 0.018626309662398137
+  },
+  {
+   "cluster_size": 2,
+   "len": 10516,
+   "accept": 0.019589197413465195
+  },
+  {
+   "cluster_size": 3,
+   "len": 22401,
+   "accept": 0.0187938038480425
+  },
+  {
+   "cluster_size": 4,
+   "len": 27420,
+   "accept": 0.0162654996353027
+  },
+  {
+   "cluster_size": 5,
+   "len": 22830,
+   "accept": 0.018265440210249673
+  },
+  {
+   "cluster_size": 6,
+   "len": 13428,
+   "accept": 0.017947572237116474
+  },
+  {
+   "cluster_size": 7,
+   "len": 6188,
+   "accept": 0.01616031027795734
+  },
+  {
+   "cluster_size": 8,
+   "len": 2618,
+   "accept": 0.0213903743315508
+  }
+ ],
+ "duplication_invariance": {
+  "1": {
+   "mean_prob_increase": 0.0,
+   "max_prob_increase": 0.0,
+   "flipped_to_accept": 0,
+   "n": 20000
+  },
+  "2": {
+   "mean_prob_increase": 0.0,
+   "max_prob_increase": 0.0,
+   "flipped_to_accept": 0,
+   "n": 20000
+  },
+  "4": {
+   "mean_prob_increase": 0.0,
+   "max_prob_increase": 0.0,
+   "flipped_to_accept": 0,
+   "n": 20000
+  },
+  "8": {
+   "mean_prob_increase": 0.0,
+   "max_prob_increase": 0.0,
+   "flipped_to_accept": 0,
+   "n": 20000
+  }
+ },
+ "population_feature_used": false
+}
+NOTE: STRESS model_C3_direct_x_more_data t=0.7: F_stress=0.98206 F_twins=0.97605 (zero-match twins 0.9690) distractor accept=0.0179; dup k=8 flips=0/20000 mean dp=+0.0000

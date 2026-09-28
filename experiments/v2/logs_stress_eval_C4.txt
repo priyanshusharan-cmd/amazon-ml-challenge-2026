@@ -1,0 +1,57 @@
+{
+ "model": "model_C4_stack_on_C3_direct_x_more_data",
+ "t": 0.7,
+ "F_stress_all_DEV": 0.9832415772964246,
+ "F_twins": 0.9774439627572455,
+ "n_twins": 121347,
+ "F_twins_zero_match": 0.9723724601666422,
+ "n_twins_zero": 6841,
+ "F_clean_same_entities": 0.9836646283482963,
+ "distractor_records": 107119,
+ "distractor_accept_rate": 0.018521457444524315,
+ "distractor_accept_by_cluster_size": [
+  {
+   "cluster_size": 1,
+   "len": 1718,
+   "accept": 0.01920838183934808
+  },
+  {
+   "cluster_size": 2,
+   "len": 10516,
+   "accept": 0.020635222518067705
+  },
+  {
+   "cluster_size": 3,
+   "len": 22401,
+   "accept": 0.01955269854024374
+  },
+  {
+   "cluster_size": 4,
+   "len": 27420,
+   "accept": 0.016921954777534647
+  },
+  {
+   "cluster_size": 5,
+   "len": 22830,
+   "accept": 0.018528252299605783
+  },
+  {
+   "cluster_size": 6,
+   "len": 13428,
+   "accept": 0.01876675603217158
+  },
+  {
+   "cluster_size": 7,
+   "len": 6188,
+   "accept": 0.01680672268907563
+  },
+  {
+   "cluster_size": 8,
+   "len": 2618,
+   "accept": 0.02024446142093201
+  }
+ ],
+ "duplication_invariance": "invariant by construction: no feature depends on other records (checked feature list)",
+ "population_feature_used": false
+}
+NOTE: STRESS model_C4_stack_on_C3_direct_x_more_data t=0.7: F_stress=0.98324 F_twins=0.97744 (zero-match twins 0.9724) distractor accept=0.0185; duplication-invariant by construction

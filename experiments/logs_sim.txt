@@ -1,0 +1,76 @@
+[sim] India_000000000.parquet: 2,486,018 pairs featurized (36s)
+[sim] India_000400000.parquet: 2,476,198 pairs featurized (72s)
+[sim] India_000800000.parquet: 2,477,503 pairs featurized (107s)
+[sim] India_001200000.parquet: 2,480,400 pairs featurized (142s)
+[sim] India_001600000.parquet: 2,478,895 pairs featurized (177s)
+[sim] India_002000000.parquet: 2,802,681 pairs featurized (216s)
+[sim] India_002400000.parquet: 2,812,275 pairs featurized (255s)
+[sim] India_002800000.parquet: 2,815,860 pairs featurized (294s)
+[sim] India_003200000.parquet: 2,814,984 pairs featurized (333s)
+[sim] India_003600000.parquet: 2,817,302 pairs featurized (372s)
+[sim] India_004000000.parquet: 938,456 pairs featurized (385s)
+[sim] India_patch_has_indic.parquet: 6,097,479 pairs featurized (468s)
+[sim] US_000000000.parquet: 1,618,350 pairs featurized (487s)
+[sim] US_000200000.parquet: 1,617,687 pairs featurized (507s)
+[sim] US_000400000.parquet: 1,617,565 pairs featurized (527s)
+[sim] US_000600000.parquet: 1,617,958 pairs featurized (547s)
+[sim] US_000800000.parquet: 1,618,675 pairs featurized (566s)
+[sim] US_001000000.parquet: 1,618,421 pairs featurized (586s)
+[sim] US_001200000.parquet: 1,617,583 pairs featurized (606s)
+[sim] US_001400000.parquet: 1,618,603 pairs featurized (625s)
+[sim] US_001600000.parquet: 1,618,260 pairs featurized (645s)
+[sim] US_001800000.parquet: 1,617,648 pairs featurized (664s)
+[sim] US_002000000.parquet: 1,618,367 pairs featurized (684s)
+[sim] US_002200000.parquet: 1,618,547 pairs featurized (704s)
+[sim] US_002400000.parquet: 1,617,197 pairs featurized (724s)
+[sim] US_002600000.parquet: 1,618,702 pairs featurized (743s)
+[sim] US_002800000.parquet: 1,618,326 pairs featurized (763s)
+[sim] US_003000000.parquet: 1,618,487 pairs featurized (783s)
+[sim] US_003200000.parquet: 1,619,050 pairs featurized (802s)
+[sim] US_003400000.parquet: 1,618,309 pairs featurized (822s)
+[sim] US_003600000.parquet: 1,617,980 pairs featurized (842s)
+[sim] US_003800000.parquet: 1,619,013 pairs featurized (862s)
+[sim] US_004000000.parquet: 1,617,763 pairs featurized (881s)
+[sim] US_004200000.parquet: 1,617,866 pairs featurized (901s)
+[sim] US_004400000.parquet: 1,620,212 pairs featurized (921s)
+[sim] US_004600000.parquet: 1,618,223 pairs featurized (940s)
+[sim] US_004800000.parquet: 1,619,170 pairs featurized (960s)
+[sim] US_005000000.parquet: 1,618,372 pairs featurized (980s)
+[sim] US_005200000.parquet: 1,617,898 pairs featurized (1000s)
+[sim] US_005400000.parquet: 1,616,876 pairs featurized (1020s)
+[sim] US_005600000.parquet: 1,618,097 pairs featurized (1039s)
+[sim] US_005800000.parquet: 1,617,944 pairs featurized (1059s)
+[sim] US_006000000.parquet: 1,512,120 pairs featurized (1077s)
+scored 83557320 rss=2.30GB free=6.62GB
+qtable sim 0 rss=0.97GB free=8.05GB
+qtable sim 1500000 rss=1.08GB free=7.96GB
+qtable sim 3000000 rss=1.24GB free=7.80GB
+qtable sim 4500000 rss=1.30GB free=7.75GB
+qtable sim 6000000 rss=1.32GB free=7.75GB
+qtable sim 7500000 rss=1.47GB free=7.59GB
+qtable sim 9000000 rss=1.46GB free=7.61GB
+group features (10320217, 19) rss=3.69GB free=5.44GB
+India_000000000.parquet (306879, 83) rss=3.33GB free=5.80GB
+India_004000000.parquet (115773, 83) rss=3.09GB free=6.04GB
+US_001600000.parquet (200000, 83) rss=3.75GB free=5.39GB
+US_003600000.parquet (200000, 83) rss=3.62GB free=5.54GB
+US_005600000.parquet (200000, 83) rss=3.91GB free=5.28GB
+done rss=2.90GB free=6.32GB
+loaded (10320217, 5) rss=2.05GB free=7.21GB
+0 4565028 rss=1.93GB free=7.39GB
+450000 4129572 rss=2.01GB free=7.38GB
+900000 4069256 rss=2.12GB free=7.29GB
+1350000 4071214 rss=2.23GB free=7.19GB
+1800000 4061946 rss=2.37GB free=7.06GB
+done (10320217, 9) rss=2.62GB free=6.69GB
+records/S1 (sim): 5.77
+BASELINE stage-1 t=0.6: F=0.97475 P=0.98294 R=0.95882 h0=0.97473 h1=0.97477
+BASELINE stage-1 t=0.7: F=0.97574 P=0.98528 R=0.95562 h0=0.97578 h1=0.97571
+BASELINE stage-1 t=0.8: F=0.97586 P=0.98718 R=0.95075 h0=0.97593 h1=0.97579
+stage3 acceptance (>=0.65): 0.5872  baseline acceptance (>=0.7): 0.5799 rss=2.40GB free=6.96GB
+E07 stage-3 t=0.6: F=0.98193 P=0.98766 R=0.97006 h0=0.98207 h1=0.98179
+E07 stage-3 t=0.65: F=0.98234 P=0.98844 R=0.96922 h0=0.98253 h1=0.98216
+E07 stage-3 t=0.7: F=0.98258 P=0.98905 R=0.96819 h0=0.98274 h1=0.98242
+E07 stage-3 t=0.75: F=0.98272 P=0.98956 R=0.96717 h0=0.98293 h1=0.98252
+E07 stage-3 t=0.8: F=0.98272 P=0.99001 R=0.96573 h0=0.98289 h1=0.98255
+E09 (E07 + expected-F floor 0.5): F=0.98280 P=0.98950 R=0.96757 h0=0.98297 h1=0.98263

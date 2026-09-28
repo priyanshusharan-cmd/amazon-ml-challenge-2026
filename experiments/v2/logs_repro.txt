@@ -1,0 +1,30 @@
+>> v2_prepare.py
+v2_prepare done rss=0.65GB free=10.52GB
+>> make_qf.py
+NOTE: qf.parquet built: 10,320,219 records; truth pairs 7,638,365
+rss=1.47GB free=9.60GB
+>> featx.py v2train
+loaded token tables rss=1.84GB free=9.26GB
+NOTE: featx v2train: 43 files done
+>> featx.py v2test
+loaded token tables rss=1.81GB free=9.30GB
+NOTE: featx v2test: 53 files done
+>> train_v2.py C3_direct_x_more_data v2train
+NOTE: C3_direct_x_more_data on v2train: fit+score complete (1317 trees)
+>> train_v2.py C3_direct_x_more_data v2test
+NOTE: C3_direct_x_more_data on v2test: fit+score complete (1317 trees)
+>> stack_v2.py C3_direct_x_more_data v2train v2test
+>> predict_v2.py model_C4_stack_on_C3_direct_x_more_data 0.7
+NOTE: submission bundle C4_stack_on_C3_direct_x_more_data t=0.7: 5,758,097 matches (accept 0.5776), validator pending (separate step)
+{
+ "model": "model_C4_stack_on_C3_direct_x_more_data",
+ "threshold": 0.7,
+ "matched_records": 5758097,
+ "accept_rate": 0.5775661363773371,
+ "s1_with_matches": 1633308,
+ "s1_rows": 1732544,
+ "s1_with_candidates": 1732538,
+ "validator": "run separately: utils/validate_submission.py needs ~10 GB RAM (see PROGRESS.md)",
+ "sha_matching": "5a7f2c062a2e109fa0c8837e0bb0680a7dc6ccfb972636d994378ccd754c237e",
+ "sha_candidates": "168dd4fde9c2b76a028c731590080877401fb91357e9d8d7a1cbf7f351f3fe32"
+} rss=1.31GB free=9.75GB

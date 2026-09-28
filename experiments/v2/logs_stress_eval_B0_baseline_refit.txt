@@ -1,0 +1,82 @@
+{
+ "model": "model_B0_baseline_refit",
+ "t": 0.65,
+ "F_stress_all_DEV": 0.9778213309109888,
+ "F_twins": 0.9726138096608626,
+ "n_twins": 121347,
+ "F_twins_zero_match": 0.9662330068703406,
+ "n_twins_zero": 6841,
+ "F_clean_same_entities": 0.9783172045849684,
+ "distractor_records": 107119,
+ "distractor_accept_rate": 0.01990309842324891,
+ "distractor_accept_by_cluster_size": [
+  {
+   "cluster_size": 1,
+   "len": 1718,
+   "accept": 0.018626309662398137
+  },
+  {
+   "cluster_size": 2,
+   "len": 10516,
+   "accept": 0.024629136553822747
+  },
+  {
+   "cluster_size": 3,
+   "len": 22401,
+   "accept": 0.022588277309048704
+  },
+  {
+   "cluster_size": 4,
+   "len": 27420,
+   "accept": 0.01812545587162655
+  },
+  {
+   "cluster_size": 5,
+   "len": 22830,
+   "accept": 0.019535698642137538
+  },
+  {
+   "cluster_size": 6,
+   "len": 13428,
+   "accept": 0.018692284778075663
+  },
+  {
+   "cluster_size": 7,
+   "len": 6188,
+   "accept": 0.015675500969618616
+  },
+  {
+   "cluster_size": 8,
+   "len": 2618,
+   "accept": 0.01680672268907563
+  }
+ ],
+ "duplication_invariance": {
+  "1": {
+   "mean_prob_increase": -0.0012721774661348328,
+   "max_prob_increase": 0.21756164446447068,
+   "flipped_to_accept": 7,
+   "n": 20000
+  },
+  "2": {
+   "mean_prob_increase": -0.0025011276839103603,
+   "max_prob_increase": 0.2413483587672406,
+   "flipped_to_accept": 5,
+   "n": 20000
+  },
+  "4": {
+   "mean_prob_increase": -0.00467104295633828,
+   "max_prob_increase": 0.2035411207984138,
+   "flipped_to_accept": 5,
+   "n": 20000
+  },
+  "8": {
+   "mean_prob_increase": -0.00697455459297195,
+   "max_prob_increase": 0.27857138744320536,
+   "flipped_to_accept": 3,
+   "n": 20000
+  }
+ },
+ "population_feature_used": true
+}
+NOTE: STRESS model_B0_baseline_refit t=0.65: F_stress=0.97782 F_twins=0.97261 (zero-match twins 0.9662) distractor accept=0.0199; dup k=8 flips=3/20000 mean dp=-0.0070

@@ -1,0 +1,9 @@
+stack train rows 2,634,331 (pos 0.724) es 182,697 rss=2.36GB free=8.03GB
+Training until validation scores don't improve for 100 rounds
+[500]	valid_0's binary_logloss: 0.0404514
+[1000]	valid_0's binary_logloss: 0.0399614
+[1500]	valid_0's binary_logloss: 0.0397261
+Early stopping, best iteration is:
+[1852]	valid_0's binary_logloss: 0.0396601
+stack fit done 1852 [('margin12', np.float64(11985857.858262122)), ('p1', np.float64(11371634.524862885)), ('num_q_only', np.float64(137976.19306880236)), ('full_ratio', np.float64(61213.17959058285)), ('comb_gap', np.float64(58652.37530475855)), ('p2', np.float64(52406.201302707195)), ('num_rel_diff', np.float64(51209.56732696295)), ('nm_shared_idf', np.float64(50804.555182635784))]
+NOTE: C4 stack on C3_direct_x_more_data: scored v2train (10,320,219 records)

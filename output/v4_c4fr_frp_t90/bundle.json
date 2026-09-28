@@ -1,0 +1,15 @@
+{
+ "variant": "c4fr_frp_t90",
+ "us_india": "C4 t=0.7 (unchanged)",
+ "france_source": "frp_fr1",
+ "france_threshold": 0.9,
+ "matched_records": 5761834,
+ "france_matched": 883625,
+ "france_accept": 0.6157695542765714,
+ "s1_with_matches": 1633230,
+ "matching_sha256": "705d9381534831d3d50329cdded0f0d21f9c640cb99902f8a3f622398e2f5d60",
+ "candidate_sha256": "dc13405de5a94849b97c9188dade5a6975269634c30185206ed6f7b4ede33688",
+ "validator": "PASS",
+ "streamed_candidate_subset": "PASS",
+ "leaderboard_score": null
+}

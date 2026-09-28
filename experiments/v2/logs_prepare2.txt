@@ -1,0 +1,3 @@
+[v2test/India] re-generated candidates for 867,245 has_indic queries (198s)
+NOTE: v2test candidates ready: 99,695,890 pairs
+v2_prepare done rss=1.72GB free=8.62GB

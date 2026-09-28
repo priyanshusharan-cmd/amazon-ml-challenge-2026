@@ -1,0 +1,13 @@
+NOTE: submission bundle C4_stack_on_C3_direct_x_more_data t=0.7: 5,758,097 matches (accept 0.5776), validator pending (separate step)
+{
+ "model": "model_C4_stack_on_C3_direct_x_more_data",
+ "threshold": 0.7,
+ "matched_records": 5758097,
+ "accept_rate": 0.5775661363773371,
+ "s1_with_matches": 1633308,
+ "s1_rows": 1732544,
+ "s1_with_candidates": 1732538,
+ "validator": "run separately: utils/validate_submission.py needs ~10 GB RAM (see PROGRESS.md)",
+ "sha_matching": "5a7f2c062a2e109fa0c8837e0bb0680a7dc6ccfb972636d994378ccd754c237e",
+ "sha_candidates": "168dd4fde9c2b76a028c731590080877401fb91357e9d8d7a1cbf7f351f3fe32"
+} rss=1.42GB free=9.41GB

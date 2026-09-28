@@ -1,0 +1,13 @@
+NOTE: submission bundle B0_baseline_refit t=0.65: 5,887,635 matches (accept 0.5906), validator pending (separate step)
+{
+ "model": "model_B0_baseline_refit",
+ "threshold": 0.65,
+ "matched_records": 5887635,
+ "accept_rate": 0.5905594503444425,
+ "s1_with_matches": 1634756,
+ "s1_rows": 1732544,
+ "s1_with_candidates": 1732538,
+ "validator": "run separately: utils/validate_submission.py needs ~10 GB RAM (see PROGRESS.md)",
+ "sha_matching": "cac548628a3704450522473ca540a05f23abbbccbc29dc1a10f06a0ca52dc24d",
+ "sha_candidates": "168dd4fde9c2b76a028c731590080877401fb91357e9d8d7a1cbf7f351f3fe32"
+} rss=1.51GB free=9.28GB

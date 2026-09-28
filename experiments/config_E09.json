@@ -1,0 +1,11 @@
+{
+ "stage2": [
+  "E07_crossfit_stage2_h0.txt",
+  "E07_crossfit_stage2_h1.txt"
+ ],
+ "stage3": "E07_crossfit_stage3.txt",
+ "extra": "fz_test.parquet",
+ "rule": "expected_f",
+ "floor": 0.5,
+ "out_dir": "SUBMISSION_E09"
+}

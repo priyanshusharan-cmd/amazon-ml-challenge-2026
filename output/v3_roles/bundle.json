@@ -1,0 +1,15 @@
+{
+  "mode": "roles",
+  "threshold": 0.8,
+  "baseline_weight": 0.0,
+  "s1_rows": 1732544,
+  "s1_with_matches": 1631363,
+  "matched_records": 5718652,
+  "model_sha256": "2af09173c65d36498f730f560d29ed376269be77948a52f2e8b3376d47dcb3d2",
+  "matching_sha256": "fa607c39297b7d9000bf1145a1a2213a0863f99e55d15792c5328c7731ac487f",
+  "candidate_sha256": "168dd4fde9c2b76a028c731590080877401fb91357e9d8d7a1cbf7f351f3fe32",
+  "official_matching_validator": "PASS",
+  "streamed_candidate_subset": "PASS",
+  "leaderboard_score": null,
+  "note": "Experimental candidate; leaderboard performance is unmeasured. Original output files preserved."
+}

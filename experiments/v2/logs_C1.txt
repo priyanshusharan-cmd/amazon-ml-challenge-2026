@@ -1,0 +1,9 @@
+train rows 6,187,700 (pos 0.073) es rows 832,690 rss=4.95GB free=5.66GB
+Training until validation scores don't improve for 50 rounds
+[250]	valid_0's binary_logloss: 0.00824251
+[500]	valid_0's binary_logloss: 0.0079511
+[750]	valid_0's binary_logloss: 0.00786862
+Early stopping, best iteration is:
+[826]	valid_0's binary_logloss: 0.00786091
+fit done 826 [('comb_gap', np.float64(12801476.196245193)), ('rank', np.float64(7194958.857878506)), ('m_ad_tset', np.float64(1056788.185586989)), ('num_q_only', np.float64(930310.7386109233)), ('cos_comb', np.float64(579652.5074304938)), ('full_ratio', np.float64(398910.76789051294)), ('num_conflict', np.float64(396563.6741706133)), ('ad_tset', np.float64(236096.93483620882))]
+NOTE: C1_no_population_feat on v2train: fit+score complete (826 trees)
