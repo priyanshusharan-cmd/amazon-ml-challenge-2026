@@ -113,6 +113,6 @@ CONF was opened during v2; it is **reused confirmation**, not a fresh holdout. O
 
 No observed v3 training/enrichment/scoring job failed from memory exhaustion. Final test scoring/export are still pending and must be checked. Keep heavy processes sequential, use checkpoints, and stop safely on low RAM.
 
-At the initial handoff no commits had been made. The user subsequently requested pushing all changes to `https://github.com/User/AmazonML-New`; code, tests, reports, this handoff, and the pre-existing untracked v2 text logs are included in that push. Original output and ZIP remain the known C4 baseline. No competition submission has been sent.
+At the initial handoff no commits had been made. The user subsequently requested pushing all changes to `https://github.com/priyanshusharan-cmd/amazon-ml-challenge-2026`; code, tests, reports, this handoff, and the pre-existing untracked v2 text logs are included in that push. Original output and ZIP remain the known C4 baseline. No competition submission has been sent.
 
 **GitHub checkout limitation:** existing `.gitignore` excludes datasets, caches, trained models, generated output, submission ZIPs, and runtime `.log` files. These remain on this computer and are not included in the push. Claude should use this local workspace to resume at test scoring. A fresh clone on another machine requires transferring the needed datasets and C3/C4/v3 caches separately or rebuilding them; cloning alone does not supply the frozen model or predictions.
