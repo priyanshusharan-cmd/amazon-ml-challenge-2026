@@ -27,7 +27,11 @@ python -m venv .venv
 <repo>/dataset/train/train_source{1,2,3}.tsv, train_ground_truth.tsv
 <repo>/dataset/test/test_source{1,2,3}.tsv
 ```
-Locations can be overridden with `ER_DATA_DIR`, `ER_CACHE_DIR` and `ER_OUTPUT_DIR`.
+In the full GitHub repository, the included data is under `<repo>/student_resource/dataset/` and is
+detected automatically. In the challenge submission archive the data is intentionally not duplicated;
+point the pipeline at the organizer-provided data with `ER_DATA_DIR`. Cache and output locations can be
+set with `ER_CACHE_DIR` and `ER_OUTPUT_DIR`. All paths are derived from the checkout or these environment
+variables; there are no user-specific absolute paths.
 
 ## Run (final v2 pipeline)
 

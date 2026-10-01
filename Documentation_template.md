@@ -1,8 +1,8 @@
 # ML Challenge 2026: Business Entity Resolution Solution Template
 
-**Team Name:** [Your Team Name]  
-**Team Members:** [List all team members]  
-**Submission Date:** [Date]
+**Team Name:** Quantum  
+**Team Members:** Priyanshu Sharan (team leader), Abdulkhadar Jamadar  
+**Submission Date:** 2 October 2026
 
 ---
 

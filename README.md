@@ -27,7 +27,8 @@ baseline ~0.97x; the sibling-feature run (E10) scored **0.933** and was withdraw
 | `utils/validate_submission.py` | official format validator |
 | `entity_resolution_solution/` | earlier prototype, kept for history (superseded, see below) |
 | `PROBLEM_STATEMENT.md` | challenge statement (was the old root README) |
-| `dataset/`, `cache/`, `output/` | data, intermediate caches, submission files. Git-ignored, never committed |
+| `student_resource/dataset/` | organizer-provided train/test TSV files (tracked with Git LFS on the submission branch) |
+| `cache/`, `output/` | intermediate caches and submission files; the two final TSV outputs are tracked with Git LFS on the submission branch |
 
 ---
 
@@ -111,7 +112,7 @@ See [`business_entity_resolution/README.md`](business_entity_resolution/README.m
 python -m venv .venv
 .venv/Scripts/python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 .venv/Scripts/python -m pip install -r business_entity_resolution/requirements.txt
-# place the challenge data in dataset/train and dataset/test
+# place data in dataset/{train,test}, use student_resource/dataset, or set ER_DATA_DIR
 cd business_entity_resolution/src && ../../.venv/Scripts/python run_all.py
 cd ../.. && .venv/Scripts/python utils/validate_submission.py --matching output/matching_results.tsv \
     --candidate output/candidate_pairs.tsv --test-dir dataset/test

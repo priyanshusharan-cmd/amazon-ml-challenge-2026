@@ -3,7 +3,18 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = Path(os.environ.get("ER_DATA_DIR", ROOT / "dataset"))
+
+
+def _default_data_dir() -> Path:
+    """Find the challenge data without depending on any user's machine path."""
+    candidates = (
+        ROOT / "dataset",
+        ROOT / "student_resource" / "dataset",
+    )
+    return next((path for path in candidates if path.exists()), candidates[0])
+
+
+DATA_DIR = Path(os.environ.get("ER_DATA_DIR", _default_data_dir()))
 CACHE_DIR = Path(os.environ.get("ER_CACHE_DIR", ROOT / "cache"))
 OUTPUT_DIR = Path(os.environ.get("ER_OUTPUT_DIR", ROOT / "output"))
 
